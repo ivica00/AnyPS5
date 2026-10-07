@@ -12,6 +12,7 @@
 #include "prx/libc/include/GuestArena.hpp"
 #include "prx/libc/include/GuestWriteWatch.hpp"
 #ifdef _WIN32
+#include "prx/libc/include/HostThreadLocal.hpp"
 #include <windows.h>
 #else
 #include <fcntl.h>
@@ -2332,14 +2333,54 @@ bool ImportMappedRanges(const Context& context, const GuestAllocations::Mapped& 
 
 bool RegisteredReadableCovers(std::uint64_t address, std::size_t bytes) {
     if (bytes == 0 || bytes > std::numeric_limits<std::uint64_t>::max() - address) return false;
-    const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
-    const auto end = address + bytes;
-    for (auto at = address; at < end;) {
-        const auto* range = containingRange(lease, at, at + 1);
-        if (range == nullptr) return false;
-        at = range->address + range->bytes;
+    static const bool memo = std::getenv("APS5_NO_REGISTERED_COVER_MEMO") == nullptr;
+    if (!memo) {
+        const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
+        const auto end = address + bytes;
+        for (auto at = address; at < end;) {
+            const auto* range = containingRange(lease, at, at + 1);
+            if (range == nullptr) return false;
+            at = range->address + range->bytes;
+        }
+        return true;
     }
-    return true;
+    struct ReadableRanges {
+        std::uint64_t generation = 0;
+        std::vector<std::pair<std::uint64_t, std::uint64_t>> ranges;
+    };
+    struct ReadableRangesStorage {};
+    auto& readable = HostThreadLocal<ReadableRanges, ReadableRangesStorage>();
+    const auto generation = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+    if (readable.generation != generation) {
+        readable.ranges.clear();
+        {
+            const auto lease = GuestAllocations::GuestAllocationsAcquire_nid_postfix();
+            readable.ranges.reserve(lease.size());
+            for (const auto& range : lease) {
+                if (range->readable) readable.ranges.emplace_back(range->address, range->address + range->bytes);
+            }
+        }
+        std::sort(readable.ranges.begin(), readable.ranges.end());
+        if (!readable.ranges.empty()) {
+            std::vector<std::pair<std::uint64_t, std::uint64_t>> merged;
+            merged.reserve(readable.ranges.size());
+            merged.push_back(readable.ranges.front());
+            for (std::size_t i = 1; i < readable.ranges.size(); ++i) {
+                if (readable.ranges[i].first <= merged.back().second) {
+                    merged.back().second = std::max(merged.back().second, readable.ranges[i].second);
+                } else {
+                    merged.push_back(readable.ranges[i]);
+                }
+            }
+            readable.ranges = std::move(merged);
+        }
+        readable.generation = generation;
+    }
+    const auto end = address + bytes;
+    const auto found = std::upper_bound(readable.ranges.begin(), readable.ranges.end(), address, [](std::uint64_t value, const auto& range) { return value < range.first; });
+    if (found == readable.ranges.begin()) return false;
+    const auto& range = *std::prev(found);
+    return address >= range.first && end <= range.second;
 }
 
 std::uint64_t RegisteredReadableEnd(std::uint64_t address) {
