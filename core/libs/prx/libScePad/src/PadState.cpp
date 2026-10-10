@@ -20,6 +20,8 @@ namespace {
     std::uint64_t lastFuseTime = 0;
     float biasIntegral[3] = {0.0f, 0.0f, 0.0f};
     bool tiltCorrection = true;
+    bool angularVelocityDeadband = false;
+    bool angularVelocityBiasCorrection = true;
     std::uint8_t nextTouchId = 0;
     bool prevTouchActive[2] = {false, false};
     std::uint8_t touchIds[2] = {0, 0};
@@ -32,6 +34,12 @@ namespace {
 
     void fuse(float dt, const std::array<float, 3>& accel, const std::array<float, 3>& gyro) {
         float gx = gyro[0], gy = gyro[1], gz = gyro[2];
+        if (angularVelocityDeadband) {
+            constexpr float kDeadband = 0.005f;
+            if (std::abs(gx) < kDeadband) gx = 0.0f;
+            if (std::abs(gy) < kDeadband) gy = 0.0f;
+            if (std::abs(gz) < kDeadband) gz = 0.0f;
+        }
         const float an = std::sqrt(accel[0] * accel[0] + accel[1] * accel[1] + accel[2] * accel[2]);
         if (tiltCorrection && an > 1.0f) {
             const float ax = accel[0] / an, ay = accel[1] / an, az = accel[2] / an;
@@ -43,12 +51,18 @@ namespace {
             const float ez = ax * vy - ay * vx;
             constexpr float kp = 1.5f;
             constexpr float ki = 0.02f;
-            biasIntegral[0] += ki * ex * dt;
-            biasIntegral[1] += ki * ey * dt;
-            biasIntegral[2] += ki * ez * dt;
-            gx += kp * ex + biasIntegral[0];
-            gy += kp * ey + biasIntegral[1];
-            gz += kp * ez + biasIntegral[2];
+            if (angularVelocityBiasCorrection) {
+                biasIntegral[0] += ki * ex * dt;
+                biasIntegral[1] += ki * ey * dt;
+                biasIntegral[2] += ki * ez * dt;
+                gx += kp * ex + biasIntegral[0];
+                gy += kp * ey + biasIntegral[1];
+                gz += kp * ez + biasIntegral[2];
+            } else {
+                gx += kp * ex;
+                gy += kp * ey;
+                gz += kp * ez;
+            }
         }
         const float hx = 0.5f * gx * dt, hy = 0.5f * gy * dt, hz = 0.5f * gz * dt;
         const Quat q = orientation;
@@ -114,7 +128,13 @@ PadData Pad::ReadState() {
     const bool live = state.hasMotion && output.motionEnabled;
     const std::array<float, 3> rest{0.0f, 9.80665f, 0.0f};
     const std::array<float, 3>& accel = live ? state.accel : rest;
-    const std::array<float, 3> gyro = live ? state.gyro : std::array<float, 3>{0.0f, 0.0f, 0.0f};
+    std::array<float, 3> gyro = live ? state.gyro : std::array<float, 3>{0.0f, 0.0f, 0.0f};
+    if (angularVelocityDeadband) {
+        constexpr float kDeadband = 0.005f;
+        if (std::abs(gyro[0]) < kDeadband) gyro[0] = 0.0f;
+        if (std::abs(gyro[1]) < kDeadband) gyro[1] = 0.0f;
+        if (std::abs(gyro[2]) < kDeadband) gyro[2] = 0.0f;
+    }
     if (live) {
         float dt = lastFuseTime != 0 && now > lastFuseTime ? static_cast<float>(now - lastFuseTime) * 1e-6f : 0.0f;
         dt = std::min(dt, 0.1f);
@@ -261,6 +281,19 @@ void Pad::SetTiltCorrection(bool enabled) {
     std::lock_guard lock(stateMutex);
     tiltCorrection = enabled;
     biasIntegral[0] = biasIntegral[1] = biasIntegral[2] = 0.0f;
+}
+
+void Pad::SetAngularVelocityDeadband(bool enabled) {
+    std::lock_guard lock(stateMutex);
+    angularVelocityDeadband = enabled;
+}
+
+void Pad::SetAngularVelocityBiasCorrection(bool enabled) {
+    std::lock_guard lock(stateMutex);
+    angularVelocityBiasCorrection = enabled;
+    if (!enabled) {
+        biasIntegral[0] = biasIntegral[1] = biasIntegral[2] = 0.0f;
+    }
 }
 
 void Pad::SetMotionEnabled(bool enabled) {
