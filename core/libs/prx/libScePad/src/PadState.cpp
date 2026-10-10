@@ -4,6 +4,7 @@
 #include <algorithm>
 #include <cmath>
 #include <cstring>
+#include <deque>
 #include <mutex>
 #include <stdexcept>
 
@@ -14,6 +15,14 @@ namespace {
     std::uint64_t timestamp = 0;
     std::exception_ptr failure;
     bool initialized = false;
+    std::deque<PadData> samples;
+    constexpr std::size_t SampleCapacity = 64;
+    PadData readState();
+
+    void enqueueSample() {
+        if (samples.size() == SampleCapacity) samples.pop_front();
+        samples.push_back(readState());
+    }
 
     struct Quat { float w = 1.0f, x = 0.0f, y = 0.0f, z = 0.0f; };
     Quat orientation;
@@ -93,14 +102,13 @@ void Pad::Initialize() {
     if (!initialized) {
         timestamp = sceKernelGetProcessTime();
         lastFuseTime = timestamp;
+        enqueueSample();
     }
     initialized = true;
 }
 
-PadData Pad::ReadState() {
-    std::lock_guard lock(stateMutex);
-    if (failure) std::rethrow_exception(failure);
-    if (!initialized) throw std::runtime_error("Pad: read before initialization");
+namespace {
+PadData readState() {
     const std::uint64_t now = sceKernelGetProcessTime();
     PadData data{};
     data.buttons = state.buttons;
@@ -162,6 +170,27 @@ PadData Pad::ReadState() {
     }
     data.touch_data_touch_num = touchNum;
     return data;
+}
+}
+
+PadData Pad::ReadState() {
+    std::lock_guard lock(stateMutex);
+    if (failure) std::rethrow_exception(failure);
+    if (!initialized) throw std::runtime_error("Pad: read before initialization");
+    return readState();
+}
+
+int Pad::ReadStates(PadData* data, int count) {
+    std::lock_guard lock(stateMutex);
+    if (failure) std::rethrow_exception(failure);
+    if (!initialized) throw std::runtime_error("Pad: read before initialization");
+    if (data == nullptr || count <= 0) throw std::invalid_argument("Pad: invalid sample buffer");
+    const int available = std::min(count, static_cast<int>(samples.size()));
+    for (int i = 0; i < available; ++i) {
+        data[i] = samples.front();
+        samples.pop_front();
+    }
+    return available;
 }
 
 void Pad::SetVibration(std::uint8_t large, std::uint8_t small) {
@@ -280,6 +309,7 @@ extern "C" void PadPublishInput_nid_postfix(const PadInputState& input) {
         state.touch == input.touch && state.deviceKind == input.deviceKind) return;
     state = input;
     timestamp = sceKernelGetProcessTime();
+    if (initialized) enqueueSample();
 }
 
 extern "C" void PadReportInputFailure_nid_postfix(std::exception_ptr error) {

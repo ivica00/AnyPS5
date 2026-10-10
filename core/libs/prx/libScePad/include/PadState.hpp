@@ -51,6 +51,7 @@ struct PadOutputState {
 namespace Pad {
 void Initialize();
 PadData ReadState();
+int ReadStates(PadData* data, int count);
 void SetVibration(std::uint8_t large, std::uint8_t small);
 void SetVibrationMode(int mode);
 void SetLightBar(bool valid, std::uint8_t r, std::uint8_t g, std::uint8_t b);

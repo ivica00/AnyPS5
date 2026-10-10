@@ -80,6 +80,42 @@ static void CheckRemoteController(int handle) {
     Require(!remote);
 }
 
+static void CheckQueuedInput(int handle) {
+    PadData data[65]{};
+    PadPublishInput_nid_postfix(PadInputState{});
+    while (scePadRead_nid_postfix(handle, data, 64) > 0) {}
+    data[0].buttons = 0xdeadbeef;
+    Require(scePadRead_nid_postfix(handle, data, 64) == 0);
+    Require(data[0].buttons == 0xdeadbeef);
+
+    PadInputState input;
+    input.buttons = static_cast<std::uint32_t>(Pad::PadButton::Options);
+    PadPublishInput_nid_postfix(input);
+    PadPublishInput_nid_postfix(input);
+    input.buttons = 0;
+    PadPublishInput_nid_postfix(input);
+    Require(scePadReadState(handle, data) == PAD_OK);
+    Require(data[0].buttons == 0);
+    Require(scePadRead_nid_postfix(handle, data, 1) == 1);
+    Require(data[0].buttons == static_cast<std::uint32_t>(Pad::PadButton::Options));
+    const auto pressedTime = data[0].timestamp;
+    Require(scePadRead_nid_postfix(handle, data, 64) == 1);
+    Require(data[0].buttons == 0 && data[0].timestamp >= pressedTime);
+    Require(scePadRead_nid_postfix(handle, data, 64) == 0);
+
+    for (int i = 1; i <= 70; ++i) {
+        input.sticks[0] = static_cast<std::uint8_t>(i);
+        PadPublishInput_nid_postfix(input);
+    }
+    data[64].buttons = 0xdeadbeef;
+    Require(scePadRead_nid_postfix(handle + 1, data, 64) == PAD_ERROR_INVALID_HANDLE);
+    Require(scePadRead_nid_postfix(handle, data, 64) == 64);
+    for (int i = 0; i < 64; ++i) Require(data[i].left_stick_x == i + 7);
+    Require(data[64].buttons == 0xdeadbeef);
+    Require(scePadRead_nid_postfix(handle, data, 64) == 0);
+    PadPublishInput_nid_postfix(PadInputState{});
+}
+
 int main() {
     constexpr int noHandle = static_cast<int>(0x80920008);
     constexpr int user = 0x10000000;
@@ -101,6 +137,7 @@ int main() {
     CheckTouchContact();
     CheckReadStateHandle(handle);
     CheckRemoteController(handle);
+    CheckQueuedInput(handle);
     Require(scePadSetVibrationMode(handle, 1) == 0);
     Require(scePadSetVibrationMode(handle, 2) == 0);
     Require(scePadSetVibrationMode(handle, 3) == PAD_ERROR_INVALID_ARG);
