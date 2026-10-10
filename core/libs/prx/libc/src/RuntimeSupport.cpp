@@ -73,6 +73,7 @@ void APS5_VABI cxa_finalize_nid_postfix(void* dsoHandle) {
     CxaFinalize_nid_no_patch(dsoHandle);
 }
 
+
 unsigned int APS5_VABI _Atomic_fetch_add_4_nid_postfix(volatile unsigned int* target, unsigned int value, int memoryOrder) {
     (void)memoryOrder;
     return GccAtomicFetchAdd(target, value);
@@ -146,4 +147,9 @@ void APS5_VABI _Unlocksyslock_nid_postfix() {
     g_sysLock.unlock();
 }
 
+unsigned __int128 APS5_VABI __udivti3_nid_postfix(unsigned __int128 a, unsigned __int128 b) {
+    return a / b;
 }
+
+}
+
