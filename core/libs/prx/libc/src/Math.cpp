@@ -80,9 +80,13 @@ float APS5_VABI ldexpf_nid_postfix(float x, int exp) { return std::ldexp(x, exp)
 double APS5_VABI fmod_nid_postfix(double x, double y) { return std::fmod(x, y); }
 float APS5_VABI roundf_nid_postfix(float x) { return std::round(x); }
 double APS5_VABI round_nid_postfix(double x) { return std::round(x); }
+float APS5_VABI nearbyintf_nid_postfix(float x) { return std::nearbyint(x); }
+double APS5_VABI nearbyint_nid_postfix(double x) { return std::nearbyint(x); }
+double APS5_VABI logb_nid_postfix(double x) { return std::logb(x); }
 float APS5_VABI cbrtf_nid_postfix(float x) { return std::cbrt(x); }
 float APS5_VABI remainderf_nid_postfix(float x, float y) { return std::remainder(x, y); }
 int APS5_VABI __isfinite_nid_postfix(double x) { return std::isfinite(x) ? 1 : 0; }
+int APS5_VABI __isinf_nid_postfix(double x) { return std::isinf(x) ? 1 : 0; }
 int APS5_VABI __isnan_nid_postfix(double x) { return std::isnan(x) ? 1 : 0; }
 int APS5_VABI __signbit_nid_postfix(double x) { return std::signbit(x) ? 1 : 0; }
 
@@ -96,6 +100,7 @@ float APS5_VABI _FCosh_nid_postfix(float x, float y) { return y * std::cosh(x); 
 struct alignas(16) LibcFloatConstant { std::uint32_t bits[4]; };
 LibcFloatConstant _FInf_nid_postfix {{0x7f800000u, 0, 0, 0}};
 LibcFloatConstant _FNan_nid_postfix {{0x7fc00000u, 0, 0, 0}};
+LibcFloatConstant _Inf_nid_postfix {{0, 0x7ff00000u, 0, 0}};
 
 short APS5_VABI _FDtest_nid_postfix(const float* value) {
     constexpr short Denormal = -2, Finite = -1, Zero = 0, Infinite = 1, NotANumber = 2;
@@ -105,6 +110,18 @@ short APS5_VABI _FDtest_nid_postfix(const float* value) {
     const auto exponent = bits & 0x7f800000u;
     const auto fraction = bits & 0x007fffffu;
     if (exponent == 0x7f800000u) return fraction != 0 ? NotANumber : Infinite;
+    if (exponent == 0) return fraction != 0 ? Denormal : Zero;
+    return Finite;
+}
+
+short APS5_VABI _Dtest_nid_postfix(const double* value) {
+    constexpr short Denormal = -2, Finite = -1, Zero = 0, Infinite = 1, NotANumber = 2;
+    if (value == nullptr) throw std::invalid_argument("_Dtest: null value");
+    std::uint64_t bits;
+    std::memcpy(&bits, value, sizeof(bits));
+    const auto exponent = bits & 0x7ff0000000000000ull;
+    const auto fraction = bits & 0x000fffffffffffffull;
+    if (exponent == 0x7ff0000000000000ull) return fraction != 0 ? NotANumber : Infinite;
     if (exponent == 0) return fraction != 0 ? Denormal : Zero;
     return Finite;
 }
