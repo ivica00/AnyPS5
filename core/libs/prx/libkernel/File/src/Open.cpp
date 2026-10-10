@@ -12,6 +12,7 @@
 
 #include <cerrno>
 #include <limits>
+#include <mutex>
 #include <stdexcept>
 #include <string>
 
@@ -19,27 +20,62 @@
 #include <fcntl.h>
 #include <io.h>
 #include <sys/stat.h>
+extern "C" _invalid_parameter_handler _set_thread_local_invalid_parameter_handler(_invalid_parameter_handler);
+static void IgnoreInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, std::uintptr_t) {}
+static std::mutex g_openMutex;
+static void EnsureStandardDescriptors() {
+    const auto previous = _set_thread_local_invalid_parameter_handler(IgnoreInvalidParameter);
+    for (int i = 0; i < 3; ++i) {
+        if (::_get_osfhandle(i) == -1) {
+            int nul = ::_open("NUL", _O_RDWR);
+            if (nul >= 0 && nul != i) {
+                ::_dup2(nul, i);
+                ::_close(nul);
+            }
+        }
+    }
+    _set_thread_local_invalid_parameter_handler(previous);
+}
 static int NativeOpen(const std::filesystem::path& p, int nativeFlags, std::uint16_t mode) {
-    return ::_wopen(p.wstring().c_str(), nativeFlags, static_cast<int>(mode));
+    std::lock_guard lock(g_openMutex);
+    EnsureStandardDescriptors();
+    int fd = ::_wopen(p.wstring().c_str(), nativeFlags, static_cast<int>(mode));
+    if (fd >= 0 && fd < 3) {
+        int target = ::_dup(fd);
+        while (target >= 0 && target < 3) {
+            int next = ::_dup(target);
+            ::_close(target);
+            target = next;
+        }
+        int nul = ::_open("NUL", _O_RDWR);
+        if (nul >= 0 && nul != fd) {
+            ::_dup2(nul, fd);
+            ::_close(nul);
+        }
+        fd = target;
+    }
+    return fd;
 }
 static std::int64_t NativeLseek(int fd, std::int64_t offset, int whence) {
+    std::lock_guard lock(File::DescriptorMutex(fd));
     return ::_lseeki64(fd, offset, whence);
 }
 static int NativeRead(int fd, void* buf, std::size_t n) {
     if (n > static_cast<std::size_t>(std::numeric_limits<unsigned int>::max())) {
         throw std::runtime_error("sceKernelRead: nbytes exceeds platform limit");
     }
+    std::lock_guard lock(File::DescriptorMutex(fd));
     return ::_read(fd, buf, static_cast<unsigned int>(n));
 }
 static int NativeWrite(int fd, const void* buf, std::size_t n) {
     if (n > static_cast<std::size_t>(std::numeric_limits<unsigned int>::max())) {
         throw std::runtime_error("sceKernelWrite: nbytes exceeds platform limit");
     }
+    std::lock_guard lock(File::DescriptorMutex(fd));
     return ::_write(fd, buf, static_cast<unsigned int>(n));
 }
-extern "C" _invalid_parameter_handler _set_thread_local_invalid_parameter_handler(_invalid_parameter_handler);
-static void IgnoreInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, std::uintptr_t) {}
 static int NativeClose(int fd) {
+    std::lock_guard lock(File::DescriptorMutex(fd));
     const auto previous = _set_thread_local_invalid_parameter_handler(IgnoreInvalidParameter);
     const int result = ::_close(fd);
     _set_thread_local_invalid_parameter_handler(previous);
@@ -66,7 +102,17 @@ static int MapFlags(int sceFlags) {
 #include <fcntl.h>
 #include <unistd.h>
 static int NativeOpen(const std::filesystem::path& p, int nativeFlags, std::uint16_t mode) {
-    return ::open(p.c_str(), nativeFlags, static_cast<mode_t>(mode));
+    int fd = ::open(p.c_str(), nativeFlags, static_cast<mode_t>(mode));
+    if (fd >= 0 && fd < 3) {
+        int target = fcntl(fd, F_DUPFD, 3);
+        int nul = ::open("/dev/null", O_RDWR);
+        if (nul >= 0 && nul != fd) {
+            dup2(nul, fd);
+            ::close(nul);
+        }
+        fd = target >= 0 ? target : fd;
+    }
+    return fd;
 }
 static std::int64_t NativeLseek(int fd, std::int64_t offset, int whence) {
     return ::lseek(fd, static_cast<off_t>(offset), whence);
@@ -136,6 +182,7 @@ int APS5_VABI sceKernelOpen(const char* path, int flags, std::uint16_t mode) {
 }
 
 int APS5_VABI sceKernelClose(int d) {
+    if (d >= 0 && d < 3) return SCE_KERNEL_ERROR_EPERM;
     File::ForgetRandomDevice(d);
 #ifdef _WIN32
     File::ForgetDirectoryDescriptor(d);

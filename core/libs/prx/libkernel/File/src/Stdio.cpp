@@ -37,6 +37,26 @@ static constexpr int KERNEL_IOV_MAX = 1024;
 #include <direct.h>
 #include <sys/stat.h>
 #include "prx/libkernel/File/include/WindowsFileTime.hpp"
+extern "C" _invalid_parameter_handler _set_thread_local_invalid_parameter_handler(_invalid_parameter_handler);
+static void IgnoreInvalidParameter(const wchar_t*, const wchar_t*, const wchar_t*, unsigned int, std::uintptr_t) {}
+static HANDLE SafeGetOsfHandle(int descriptor) {
+    if (descriptor < 0) return INVALID_HANDLE_VALUE;
+    const auto previous = _set_thread_local_invalid_parameter_handler(IgnoreInvalidParameter);
+    const auto handle = reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor));
+    _set_thread_local_invalid_parameter_handler(previous);
+    return handle;
+}
+static int SafeClose(int descriptor) {
+    if (descriptor < 0) {
+        errno = EBADF;
+        return -1;
+    }
+    std::lock_guard lock(File::DescriptorMutex(descriptor));
+    const auto previous = _set_thread_local_invalid_parameter_handler(IgnoreInvalidParameter);
+    const int result = ::_close(descriptor);
+    _set_thread_local_invalid_parameter_handler(previous);
+    return result;
+}
 static int NativeRmdir(const std::filesystem::path& path) {
     return ::_wrmdir(path.wstring().c_str());
 }
@@ -50,7 +70,7 @@ static int NativeChmod(const std::filesystem::path& path, int mode) {
 }
 static std::optional<std::filesystem::path> NativeDescriptorPath(int descriptor) {
     if (auto directory = File::DirectoryDescriptorPath(descriptor)) return directory;
-    const auto handle = reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor));
+    const auto handle = SafeGetOsfHandle(descriptor);
     if (handle == INVALID_HANDLE_VALUE) {
         errno = EBADF;
         return std::nullopt;
@@ -97,7 +117,7 @@ static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* 
 }
 static int NativeFutimes(int descriptor, const KernelTimeval* times) {
     if (const auto directory = File::DirectoryDescriptorPath(descriptor)) return NativeUtimes(*directory, times);
-    const auto original = reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor));
+    const auto original = SafeGetOsfHandle(descriptor);
     if (original == INVALID_HANDLE_VALUE) { errno = EBADF; return -1; }
     if (GetFileType(original) != FILE_TYPE_DISK) { errno = EINVAL; return -1; }
     const auto handle = ReOpenFile(original, FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, 0);
@@ -116,7 +136,8 @@ std::int64_t NativePositioned_nid_no_patch(int descriptor, void* buf, std::size_
     if (nbytes > static_cast<std::size_t>(std::numeric_limits<DWORD>::max())) {
         throw std::runtime_error("NativePositioned: nbytes exceeds platform limit");
     }
-    const auto handle = reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor));
+    std::lock_guard lock(File::DescriptorMutex(descriptor));
+    const auto handle = SafeGetOsfHandle(descriptor);
     if (handle == INVALID_HANDLE_VALUE) {
         errno = EBADF;
         return -1;
@@ -126,12 +147,15 @@ std::int64_t NativePositioned_nid_no_patch(int descriptor, void* buf, std::size_
         errno = ESPIPE;
         return -1;
     }
-    OVERLAPPED overlapped{};
-    overlapped.Offset = static_cast<DWORD>(offset);
-    overlapped.OffsetHigh = static_cast<DWORD>(static_cast<std::uint64_t>(offset) >> 32u);
+    LARGE_INTEGER target{};
+    target.QuadPart = offset;
+    if (!::SetFilePointerEx(handle, target, nullptr, FILE_BEGIN)) {
+        errno = EINVAL;
+        return -1;
+    }
     DWORD done = 0;
-    const BOOL ok = write ? ::WriteFile(handle, buf, static_cast<DWORD>(nbytes), &done, &overlapped)
-                          : ::ReadFile(handle, buf, static_cast<DWORD>(nbytes), &done, &overlapped);
+    const BOOL ok = write ? ::WriteFile(handle, buf, static_cast<DWORD>(nbytes), &done, nullptr)
+                          : ::ReadFile(handle, buf, static_cast<DWORD>(nbytes), &done, nullptr);
     const DWORD error = ok ? ERROR_SUCCESS : ::GetLastError();
     if (!::SetFilePointerEx(handle, position, nullptr, FILE_BEGIN)) {
         throw std::runtime_error("NativePositioned: cannot restore the file offset");
@@ -147,10 +171,11 @@ static std::int64_t NativeTransfer(int descriptor, void* buf, std::size_t nbytes
     if (nbytes > static_cast<std::size_t>(std::numeric_limits<int>::max())) {
         throw std::runtime_error("NativeTransfer: nbytes exceeds platform limit");
     }
+    std::lock_guard lock(File::DescriptorMutex(descriptor));
     return write ? ::_write(descriptor, buf, static_cast<unsigned int>(nbytes)) : ::_read(descriptor, buf, static_cast<unsigned int>(nbytes));
 }
 static bool NativeIsDisk(int descriptor) {
-    const auto handle = reinterpret_cast<HANDLE>(::_get_osfhandle(descriptor));
+    const auto handle = SafeGetOsfHandle(descriptor);
     return handle != INVALID_HANDLE_VALUE && ::GetFileType(handle) == FILE_TYPE_DISK;
 }
 static std::int64_t NativePread(int descriptor, void* buf, std::size_t nbytes, std::int64_t offset) {
@@ -271,12 +296,16 @@ int APS5_VABI chmod_nid_postfix(const char* path, int mode) {
 }
 
 int APS5_VABI close_nid_postfix(int d) {
+    if (d >= 0 && d < 3) {
+        *__error_nid_postfix() = 1;
+        return -1;
+    }
     if (d >= GuestSockets::FirstDescriptor) return GuestSockets::Close(d);
     File::ForgetRandomDevice(d);
 #ifdef _WIN32
     File::ForgetDirectoryDescriptor(d);
     File::ForgetFileLock(d);
-    return _close(d);
+    return SafeClose(d);
 #else
     return ::close(d);
 #endif

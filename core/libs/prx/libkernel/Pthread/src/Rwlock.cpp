@@ -43,7 +43,28 @@ int APS5_VABI scePthreadRwlockRdlock(PthreadRwlock* rwlock) {
     auto* lock = RequireRwlock(rwlock, __func__);
     if (OwnsWrite(lock)) return SCE_KERNEL_ERROR_EDEADLK;
 #ifdef _WIN32
-    while (!lock->_lock.try_lock_shared()) TimedWait::SleepNanos(1000000);
+    for (int attempts = 0;; ++attempts) {
+        if (lock->_lock.try_lock_shared()) break;
+        bool acquired = false;
+        for (int spin = 0; spin < 40; ++spin) {
+#if defined(__x86_64__) || defined(_M_X64)
+            __builtin_ia32_pause();
+#endif
+            if (lock->_lock.try_lock_shared()) {
+                acquired = true;
+                break;
+            }
+        }
+        if (acquired) break;
+        if (attempts < 4) {
+            std::this_thread::yield();
+        } else if (attempts < 16) {
+            TimedWait::DrainApcs();
+            std::this_thread::yield();
+        } else {
+            TimedWait::SleepNanos(1000000);
+        }
+    }
 #else
     lock->_lock.lock_shared();
 #endif
@@ -67,7 +88,28 @@ int APS5_VABI scePthreadRwlockWrlock(PthreadRwlock* rwlock) {
     auto* lock = RequireRwlock(rwlock, __func__);
     if (OwnsWrite(lock)) return SCE_KERNEL_ERROR_EDEADLK;
 #ifdef _WIN32
-    while (!lock->_lock.try_lock()) TimedWait::SleepNanos(1000000);
+    for (int attempts = 0;; ++attempts) {
+        if (lock->_lock.try_lock()) break;
+        bool acquired = false;
+        for (int spin = 0; spin < 40; ++spin) {
+#if defined(__x86_64__) || defined(_M_X64)
+            __builtin_ia32_pause();
+#endif
+            if (lock->_lock.try_lock()) {
+                acquired = true;
+                break;
+            }
+        }
+        if (acquired) break;
+        if (attempts < 4) {
+            std::this_thread::yield();
+        } else if (attempts < 16) {
+            TimedWait::DrainApcs();
+            std::this_thread::yield();
+        } else {
+            TimedWait::SleepNanos(1000000);
+        }
+    }
 #else
     lock->_lock.lock();
 #endif

@@ -11,6 +11,7 @@ namespace TimedWait {
 
 bool Coarse();
 void BindThreadWaitState(std::atomic<int>* state);
+void DrainApcs();
 std::uint64_t NowNanos();
 std::uint64_t DeadlineNanos(std::uint64_t microseconds);
 std::uint64_t RemainingMicros(std::uint64_t deadlineNanos);

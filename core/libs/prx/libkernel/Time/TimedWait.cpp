@@ -31,6 +31,8 @@ ThreadWaitState& WaitState() {
 #endif
 }
 
+}
+
 #ifdef _WIN32
 
 using NtTestAlertFunction = LONG(NTAPI*)();
@@ -40,6 +42,16 @@ void DrainApcs() {
     if (testAlert) testAlert();
     else SleepEx(0, TRUE);
 }
+
+#else
+
+void DrainApcs() {}
+
+#endif
+
+#ifdef _WIN32
+
+namespace {
 
 DWORD AlertableWait(DWORD count, const HANDLE* handles, DWORD milliseconds) {
     WaitState().bound->fetch_add(1, std::memory_order_seq_cst);

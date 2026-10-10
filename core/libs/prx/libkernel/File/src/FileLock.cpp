@@ -37,6 +37,12 @@ void SetHeldLock(int fd, int mode) {
 
 namespace File {
 
+static std::mutex g_descriptorMutexes[64];
+
+std::mutex& DescriptorMutex(int fd) {
+    return g_descriptorMutexes[static_cast<unsigned int>(fd >= 0 ? fd : 0) % 64];
+}
+
 int Flock(int fd, int operation) {
     const int mode = operation & (LockShared | LockExclusive | LockUnlock);
     if (mode != LockShared && mode != LockExclusive && mode != LockUnlock) {

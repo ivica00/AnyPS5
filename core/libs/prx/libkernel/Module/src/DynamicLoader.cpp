@@ -125,7 +125,19 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
         } else {
             if (!*path) { Error("dlopen: empty module path"); return nullptr; }
             const auto resolved = RelinkedModulePath(ResolvePath_nid_no_patch(path));
+            FILE* file = _wfopen(resolved.c_str(), L"rb");
+            if (file) {
+                std::uint16_t magic = 0;
+                const auto readCount = std::fread(&magic, sizeof(magic), 1, file);
+                std::fclose(file);
+                if (readCount == 1 && magic != 0x5a4d) {
+                    Error("dlopen: module is not a Windows PE image");
+                    return nullptr;
+                }
+            }
+            const auto oldMode = SetErrorMode(SEM_FAILCRITICALERRORS | SEM_NOGPFAULTERRORBOX);
             module->native = LoadLibraryExW(resolved.c_str(), nullptr, LOAD_WITH_ALTERED_SEARCH_PATH);
+            SetErrorMode(oldMode);
         }
         if (!module->native) {
             char message[128];
