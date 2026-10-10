@@ -103,7 +103,11 @@ void write(std::array<std::byte, TSize>& data, std::size_t offset, TValue value)
 }
 
 int main(int argc, char** argv) {
-    reject([] { ApplicationHeapAllocate_nid_no_patch(64); });
+    void* earlyFree = ApplicationHeapAllocate_nid_no_patch(64);
+    auto* earlyResize = static_cast<unsigned char*>(ApplicationHeapCalloc_nid_no_patch(8, 8));
+    void* earlyAlign = ApplicationHeapAlign_nid_no_patch(64, 64);
+    std::memset(earlyResize, 0x5a, 64);
+    std::memset(earlyAlign, 0x3c, 64);
     reject([] { ApplicationHeapRegister_nid_no_patch(nullptr); });
     std::array<std::byte, 0x40> process{};
     std::array<std::byte, 0x38> libc{};
@@ -179,6 +183,16 @@ int main(int argc, char** argv) {
     ApplicationHeapInitialize_nid_no_patch(process.data());
     ApplicationHeapInitialize_nid_no_patch(process.data());
     require(initializes == 1);
+    ApplicationHeapFree_nid_no_patch(earlyFree);
+    reject([&] { ApplicationHeapReallocate_nid_no_patch(earlyResize, SIZE_MAX); });
+    earlyResize = static_cast<unsigned char*>(ApplicationHeapReallocate_nid_no_patch(earlyResize, 128));
+    for (unsigned i = 0; i < 64; ++i) require(earlyResize[i] == 0x5a);
+    earlyAlign = ApplicationHeapRealign_nid_no_patch(earlyAlign, 128, 256);
+    require(reinterpret_cast<std::uintptr_t>(earlyAlign) % 256 == 0);
+    for (unsigned i = 0; i < 64; ++i) require(static_cast<unsigned char*>(earlyAlign)[i] == 0x3c);
+    ApplicationHeapFree_nid_no_patch(earlyResize);
+    ApplicationHeapFree_nid_no_patch(earlyAlign);
+    require(frees == 0);
     void* pointer = ApplicationHeapAlign_nid_no_patch(4, 64);
     require(pointer == storage.data() && lastAlignment == 4 && lastSize == 64);
     release(pointer);

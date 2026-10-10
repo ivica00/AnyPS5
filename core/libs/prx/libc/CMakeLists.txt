@@ -37,6 +37,7 @@ target_sources(libc PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Errors.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/Syslog.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/CxxAbiSupport.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/src/Threads.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/src/exception/Exports.cpp
 )
 
@@ -486,5 +487,19 @@ if(MINGW)
         set_target_properties(windows_exception_tests PROPERTIES EXCLUDE_FROM_ALL FALSE)
         add_test(NAME windows_exceptions COMMAND windows_exception_tests)
         set_tests_properties(windows_exceptions PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
+add_test_executable(libc_backtrace_tests EXCLUDE_FROM_ALL ${LIBS_INCLUDE_DIR}/tests/LibcBacktrace.cpp)
+target_include_directories(libc_backtrace_tests PRIVATE ${LIBS_INCLUDE_DIR})
+target_link_libraries(libc_backtrace_tests PRIVATE libc)
+configure_windows_unwind(libc_backtrace_tests)
+if(BUILD_TESTING)
+    set_target_properties(libc_backtrace_tests PROPERTIES EXCLUDE_FROM_ALL FALSE)
+    add_test(NAME libc_backtrace COMMAND libc_backtrace_tests)
+    set_tests_properties(libc_backtrace PROPERTIES TIMEOUT 10)
+    if(WIN32)
+        set_tests_properties(libc_backtrace PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
 endif()

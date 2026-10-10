@@ -11,6 +11,8 @@
 #include <new>
 #include <stdexcept>
 #include <algorithm>
+#include <set>
+#include <utility>
 
 namespace {
 
@@ -32,17 +34,68 @@ Initialize heapFinalize = nullptr;
 bool heapFinalized = false;
 thread_local bool heapCallbackActive = false;
 
-void* APS5_VABI defaultAllocate(std::size_t bytes) { return GuestHeap::GuestHeapAllocate_nid_postfix(bytes); }
-void APS5_VABI defaultFree(void* pointer) { GuestHeap::GuestHeapFree_nid_postfix(pointer); }
-void* APS5_VABI defaultReallocate(void* pointer, std::size_t bytes) { return GuestHeap::GuestHeapReallocate_nid_postfix(pointer, bytes); }
+std::mutex defaultMutex;
+std::set<void*> defaultPointers;
+
+void* trackDefault(void* pointer) {
+    try {
+        std::lock_guard lock(defaultMutex);
+        defaultPointers.insert(pointer);
+    } catch (...) {
+        GuestHeap::GuestHeapFree_nid_postfix(pointer);
+        throw;
+    }
+    return pointer;
+}
+
+bool ownsDefault(void* pointer) {
+    std::lock_guard lock(defaultMutex);
+    return defaultPointers.contains(pointer);
+}
+
+void* APS5_VABI defaultAllocate(std::size_t bytes) {
+    return trackDefault(GuestHeap::GuestHeapAllocate_nid_postfix(bytes));
+}
+
+void APS5_VABI defaultFree(void* pointer) {
+    if (pointer == nullptr) return;
+    std::lock_guard lock(defaultMutex);
+    if (!defaultPointers.contains(pointer)) throw std::invalid_argument("application heap: pointer does not belong to default allocator");
+    GuestHeap::GuestHeapFree_nid_postfix(pointer);
+    defaultPointers.erase(pointer);
+}
+
+void* APS5_VABI defaultReallocate(void* pointer, std::size_t bytes) {
+    if (pointer == nullptr) return defaultAllocate(bytes);
+    std::lock_guard lock(defaultMutex);
+    if (!defaultPointers.contains(pointer)) throw std::invalid_argument("application heap: pointer does not belong to default allocator");
+    void* result = GuestHeap::GuestHeapReallocate_nid_postfix(pointer, bytes);
+    auto node = defaultPointers.extract(pointer);
+    if (result != nullptr) {
+        node.value() = result;
+        defaultPointers.insert(std::move(node));
+    }
+    return result;
+}
 void* APS5_VABI defaultCalloc(std::size_t count, std::size_t bytes) {
     if (bytes != 0 && count > std::numeric_limits<std::size_t>::max() / bytes) throw std::bad_alloc();
     auto* pointer = defaultAllocate(count * bytes);
     std::memset(pointer, 0, count * bytes);
     return pointer;
 }
-void* APS5_VABI defaultAlign(std::size_t alignment, std::size_t bytes) { return GuestHeap::GuestHeapAlign_nid_postfix(alignment, bytes); }
-void* APS5_VABI defaultRealign(void* pointer, std::size_t bytes, std::size_t alignment) { return GuestHeap::GuestHeapRealign_nid_postfix(pointer, bytes, alignment); }
+void* APS5_VABI defaultAlign(std::size_t alignment, std::size_t bytes) { return trackDefault(GuestHeap::GuestHeapAlign_nid_postfix(alignment, bytes)); }
+void* APS5_VABI defaultRealign(void* pointer, std::size_t bytes, std::size_t alignment) {
+    if (pointer == nullptr) return defaultAlign(alignment, bytes);
+    std::lock_guard lock(defaultMutex);
+    if (!defaultPointers.contains(pointer)) throw std::invalid_argument("application heap: pointer does not belong to default allocator");
+    void* result = GuestHeap::GuestHeapRealign_nid_postfix(pointer, bytes, alignment);
+    auto node = defaultPointers.extract(pointer);
+    if (result != nullptr) {
+        node.value() = result;
+        defaultPointers.insert(std::move(node));
+    }
+    return result;
+}
 int APS5_VABI defaultPosixAlign(void** pointer, std::size_t alignment, std::size_t bytes) {
     if (pointer == nullptr || alignment < sizeof(void*) || (alignment & (alignment - 1)) != 0) return 22;
     try { *pointer = defaultAlign(alignment, bytes); return 0; }
@@ -170,7 +223,8 @@ void* ApplicationHeapAllocate_nid_no_patch(std::size_t bytes) {
 
 void ApplicationHeapFree_nid_no_patch(void* pointer) {
     if (pointer == nullptr) return;
-    const auto free = callback<Free>(1);
+    const auto registeredFree = callback<Free>(1);
+    const auto free = ownsDefault(pointer) ? defaultFree : registeredFree;
     CallbackScope scope;
     free(pointer);
 }
@@ -180,7 +234,8 @@ void* ApplicationHeapReallocate_nid_no_patch(void* pointer, std::size_t bytes) {
         ApplicationHeapFree_nid_no_patch(pointer);
         return nullptr;
     }
-    const auto reallocate = callback<Reallocate>(3);
+    const auto registeredReallocate = callback<Reallocate>(3);
+    const auto reallocate = ownsDefault(pointer) ? defaultReallocate : registeredReallocate;
     CallbackScope scope;
     return requireAllocation(reallocate(pointer, bytes));
 }
@@ -209,6 +264,7 @@ void* ApplicationHeapRealign_nid_no_patch(void* pointer, std::size_t bytes, std:
         if (heapApi[5] != nullptr) std::memcpy(&realign, &heapApi[5], sizeof(realign));
         else realign = defaultRealign;
     }
+    if (ownsDefault(pointer)) realign = defaultRealign;
     CallbackScope scope;
     void* result = requireAllocation(realign(pointer, bytes, alignment));
     if (reinterpret_cast<std::uintptr_t>(result) % alignment != 0) throw std::runtime_error("application heap: allocator returned a misaligned pointer");

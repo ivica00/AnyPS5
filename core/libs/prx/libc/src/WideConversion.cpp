@@ -28,4 +28,3 @@ extern "C" std::size_t APS5_VABI mbstowcs_nid_postfix(std::uint16_t* destination
     }
     return count;
 }
-
