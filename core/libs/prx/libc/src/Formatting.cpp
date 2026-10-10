@@ -465,4 +465,10 @@ int APS5_VABI puts_nid_postfix(const char* s) {
     return std::puts(s);
 }
 
+struct StdSetw { int n; };
+StdSetw APS5_VABI _ZSt4setwi_nid_postfix(int n) {
+    return {n};
 }
+
+}
+

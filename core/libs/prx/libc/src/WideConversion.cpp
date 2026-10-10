@@ -17,3 +17,15 @@ extern "C" std::size_t APS5_VABI wcstombs_nid_postfix(char* destination, const s
     }
     return count;
 }
+
+extern "C" std::size_t APS5_VABI mbstowcs_nid_postfix(std::uint16_t* destination, const char* source, std::size_t capacity) {
+    std::size_t count = 0;
+    while (!destination || count < capacity) {
+        const auto value = static_cast<unsigned char>(source[count]);
+        if (destination) destination[count] = value;
+        if (value == 0) break;
+        ++count;
+    }
+    return count;
+}
+
