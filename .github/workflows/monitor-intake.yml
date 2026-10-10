@@ -1,0 +1,59 @@
+name: Monitor Upstream Intake
+
+on:
+  schedule:
+    - cron: '0 */6 * * *'
+  workflow_dispatch:
+
+permissions:
+  issues: write
+  pull-requests: write
+
+jobs:
+  check-intake:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+
+      - name: Check Upstream Intake Status
+        id: check
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set +e
+          python tools/check_intake.py --json > report.json
+          EXIT_CODE=$?
+          cat report.json
+          echo "exit_code=$EXIT_CODE" >> "$GITHUB_OUTPUT"
+          set -e
+
+      - name: Notify via Issue if Intake is Open or Carry Found
+        if: steps.check.outputs.exit_code == '10'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          REASON=$(jq -r '.intake.reason' report.json)
+          TITLE="[ALERT] AnyPS5 Upstream PR Intake is OPEN!"
+          BODY=$(cat <<EOF
+          ### 🚨 Obavijest o ukidanju pauze na AnyPS5
+
+          Upstream repozitorij **boykopovar/AnyPS5** više nema aktivnu pauzu za unos PR-ova!
+
+          - **Detalj statusa:** ${REASON}
+          - **Vrijeme detekcije:** $(date -u +"%Y-%m-%d %H:%M:%SZ")
+
+          #### Koraci za podnošenje:
+          1. Možeš ponovno otvoriti (Reopen) zatvoreni PR #2604 na [boykopovar/AnyPS5/pull/2604](https://github.com/boykopovar/AnyPS5/pull/2604).
+          2. Možeš otvoriti preostale pripremljene grane:
+             - \`feat/net-resolver-records\`
+             - \`feat/pad-motion-deadband\`
+             - \`feat/videoout-vrr\`
+          EOF
+          )
+          gh issue create --title "$TITLE" --body "$BODY" --repo "$GITHUB_REPOSITORY"
