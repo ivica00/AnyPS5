@@ -114,6 +114,7 @@ void Driver::execute(const Submission& submission) {
     struct ClearAhead {
         ~ClearAhead() { clearResolvedAhead(); }
     } clearAhead;
+    bool hasDeferredInterrupt = false;
     for (std::size_t cursor = 0; cursor < submission.commands.size();) {
         if (packetEpoch()) bumpEpoch(&EpochBumps::packets);
         CheckFailure();
@@ -185,6 +186,7 @@ void Driver::execute(const Submission& submission) {
 
         bool wroteOnGpu = false, endOfPipeInterrupt = false, interruptDeferred = false, drawPacket = false, sampleDump = false;
         const bool drains = preparePacketMemory(submission, queue, packet, header, opcode, wroteOnGpu, endOfPipeInterrupt, interruptDeferred, drawPacket, sampleDump);
+        if (interruptDeferred) hasDeferredInterrupt = true;
         traceLabel(packet, submission.queue);
         timing.Mark("prepare_memory");
 
@@ -317,10 +319,10 @@ void Driver::execute(const Submission& submission) {
 
     PerformanceContext endContext(submission.queue == 0 ? frameTiming() : FrameTiming::Async());
     PerformanceTimer endTiming("Driver.EndSubmission");
-    static const bool submitAtEnd = std::getenv("APS5_SUBMIT_AT_END") != nullptr;
+    static const bool submitAtEnd = std::getenv("APS5_NO_SUBMIT_AT_END") == nullptr;
     if (!deferredLabels().labels.empty() || Graphics::Recorder::PendingLabelSince().has_value() || Graphics::Recorder::RecordedWorkSinceSubmit() != 0) {
         auto& costs = submissionCosts(submission.queue);
-        if (!submitAtEnd && submission.rewindTail == nullptr && submission.queue == 0 && workerQueued() != nullptr && workerQueued()->load(std::memory_order_acquire) != 0) {
+        if (!submitAtEnd && submission.labelWrites.empty() && !hasDeferredInterrupt && submission.rewindTail == nullptr && submission.queue == 0 && workerQueued() != nullptr && workerQueued()->load(std::memory_order_acquire) != 0) {
             ++costs.endSkipped;
             return;
         }
