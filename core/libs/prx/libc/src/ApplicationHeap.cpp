@@ -80,6 +80,7 @@ TCallback callback(std::size_t index) {
     std::lock_guard lock(heapMutex);
     if (heapFailure) std::rethrow_exception(heapFailure);
     if (heapFinalized) throw std::runtime_error("application heap: allocator has been finalized");
+    if (heapApi[0] == nullptr) heapApi = defaultApi();
     if (heapApi[index] == nullptr) throw std::runtime_error("application heap: allocator API is not registered");
     static_assert(sizeof(TCallback) == sizeof(void*));
     TCallback result;
@@ -131,7 +132,7 @@ void ApplicationHeapRegister_nid_no_patch(void* const* api) {
     std::lock_guard lock(heapMutex);
     if (heapFailure) std::rethrow_exception(heapFailure);
     if (heapFinalized) throw std::runtime_error("application heap: allocator has been finalized");
-    if (heapApi[0] != nullptr && heapApi != replacement) throw std::runtime_error("application heap: cannot replace an active allocator");
+    if (heapApi[0] != nullptr && heapApi != defaultApi() && heapApi != replacement) throw std::runtime_error("application heap: cannot replace an active allocator");
     heapApi = replacement;
 }
 
@@ -204,7 +205,7 @@ void* ApplicationHeapRealign_nid_no_patch(void* pointer, std::size_t bytes, std:
         std::lock_guard lock(heapMutex);
         if (heapFailure) std::rethrow_exception(heapFailure);
         if (heapFinalized) throw std::runtime_error("application heap: allocator has been finalized");
-        if (heapApi[0] == nullptr) throw std::runtime_error("application heap: allocator API is not registered");
+        if (heapApi[0] == nullptr) heapApi = defaultApi();
         if (heapApi[5] != nullptr) std::memcpy(&realign, &heapApi[5], sizeof(realign));
         else realign = defaultRealign;
     }
@@ -242,7 +243,7 @@ int ApplicationHeapStatsFast_nid_no_patch(void* stats) {
         std::lock_guard lock(heapMutex);
         if (heapFailure) std::rethrow_exception(heapFailure);
         if (heapFinalized) throw std::runtime_error("application heap: allocator has been finalized");
-        if (heapApi[0] == nullptr) throw std::runtime_error("application heap: allocator API is not registered");
+        if (heapApi[0] == nullptr) heapApi = defaultApi();
         if (heapApi[8] == nullptr) throw std::runtime_error("malloc_stats_fast: implemented only for an application allocator that provides it");
         std::memcpy(&statsFast, &heapApi[8], sizeof(statsFast));
     }
