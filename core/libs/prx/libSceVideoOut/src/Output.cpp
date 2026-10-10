@@ -301,18 +301,12 @@ int APS5_VABI sceVideoOutAdjustColor(int handle, const VideoOutColorSettings* se
     LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutVrrUnpegFromFixedRate() try {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceVideoOutVrrUnpegFromFixedRate() {
     return 0;
-} catch (const ProcessShutdown&) {
-    LibcAwaitExit_nid_postfix();
 }
 
-int APS5_VABI sceVideoOutVrrPegToFixedRate() try {
-    NotImplemented_nid_no_patch(__func__);
+int APS5_VABI sceVideoOutVrrPegToFixedRate() {
     return 0;
-} catch (const ProcessShutdown&) {
-    LibcAwaitExit_nid_postfix();
 }
 
 int APS5_VABI sceVideoOutAddVrrStatusFlagsPrivilege() {
