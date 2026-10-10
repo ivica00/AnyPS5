@@ -182,15 +182,12 @@ std::int64_t NativePositioned_nid_no_patch(int descriptor, void* buf, std::size_
         errno = ESPIPE;
         return -1;
     }
-    LARGE_INTEGER target{};
-    target.QuadPart = offset;
-    if (!::SetFilePointerEx(handle, target, nullptr, FILE_BEGIN)) {
-        errno = EINVAL;
-        return -1;
-    }
+    OVERLAPPED overlapped{};
+    overlapped.Offset = static_cast<DWORD>(offset);
+    overlapped.OffsetHigh = static_cast<DWORD>(static_cast<std::uint64_t>(offset) >> 32u);
     DWORD done = 0;
-    const BOOL ok = write ? ::WriteFile(handle, buf, static_cast<DWORD>(nbytes), &done, nullptr)
-                          : ::ReadFile(handle, buf, static_cast<DWORD>(nbytes), &done, nullptr);
+    const BOOL ok = write ? ::WriteFile(handle, buf, static_cast<DWORD>(nbytes), &done, &overlapped)
+                          : ::ReadFile(handle, buf, static_cast<DWORD>(nbytes), &done, &overlapped);
     const DWORD error = ok ? ERROR_SUCCESS : ::GetLastError();
     if (!::SetFilePointerEx(handle, position, nullptr, FILE_BEGIN)) {
         throw std::runtime_error("NativePositioned: cannot restore the file offset");
