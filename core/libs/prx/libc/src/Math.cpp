@@ -1,4 +1,5 @@
 #include <mutex>
+#include <bit>
 #include <cstdint>
 #include <cfenv>
 #include <cmath>
@@ -140,6 +141,14 @@ int APS5_VABI __isfinite_nid_postfix(double x) { return std::isfinite(x) ? 1 : 0
 int APS5_VABI __isnan_nid_postfix(double x) { return std::isnan(x) ? 1 : 0; }
 int APS5_VABI __isinf_nid_postfix(double x) { return std::isinf(x) ? 1 : 0; }
 int APS5_VABI __signbit_nid_postfix(double x) { return std::signbit(x) ? 1 : 0; }
+float APS5_VABI nanf_nid_postfix(const char* tagp) {
+    (void)tagp;
+    return std::bit_cast<float>(0x7fc00000u);
+}
+double APS5_VABI nan_nid_postfix(const char* tagp) {
+    (void)tagp;
+    return std::bit_cast<double>(0x7ff8000000000000ull);
+}
 
 double APS5_VABI modf_nid_postfix(double x, double* integral) { return std::modf(x, integral); }
 float APS5_VABI modff_nid_postfix(float x, float* integral) { return std::modf(x, integral); }
