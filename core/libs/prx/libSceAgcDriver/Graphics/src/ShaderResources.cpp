@@ -54,7 +54,8 @@ VkComponentSwizzle ComponentSwizzleFor(std::uint8_t dstSel) {
 
 VkComponentMapping ViewComponents(const GuestTextureResource& resource) {
     if (IsConvertedTextureFormat(resource.format)) return {VK_COMPONENT_SWIZZLE_R, VK_COMPONENT_SWIZZLE_G, VK_COMPONENT_SWIZZLE_B, VK_COMPONENT_SWIZZLE_A};
-    return {ComponentSwizzleFor(resource.dstSelX), ComponentSwizzleFor(resource.dstSelY), ComponentSwizzleFor(resource.dstSelZ), ComponentSwizzleFor(resource.dstSelW)};
+    const auto channel = [&](std::uint8_t dstSel) { return TextureComponentChannel(resource.format, ComponentSwizzleFor(dstSel)); };
+    return {channel(resource.dstSelX), channel(resource.dstSelY), channel(resource.dstSelZ), channel(resource.dstSelW)};
 }
 
 // Sampled textures are reused across draws and dispatches while their guest bytes are unchanged; a
@@ -358,6 +359,7 @@ struct LookupRecord {
     DccKeys keys;
     std::uint64_t generation;
     const StorageTexture* source;
+    bool depth = false;
 };
 
 thread_local std::vector<LookupRecord>* lookupLogSlot = nullptr;
@@ -516,7 +518,10 @@ std::uint64_t sampledBudget(const Context& context, TextureCache& cache) {
 std::shared_ptr<Texture> cachedTexture(const Context& context, std::span<const std::uint32_t> words, const GuestTextureResource& resource, VkComponentMapping components, std::uint64_t guestBytes = 0, bool depthCompare = false) {
     CaptureTrace::Log("sampled-lookup address=%llx width=%u height=%u dcc=%llx", static_cast<unsigned long long>(resource.baseAddress), resource.width, resource.height, static_cast<unsigned long long>(resource.dccAddress));
     if (auto* recorder = Recorder::Active(); recorder != nullptr) recorder->BoundKeptBytes();
-    if (auto depth = DepthSurfaceTexture(context, words, resource, components)) return depth;
+    if (auto depth = DepthSurfaceTexture(context, words, resource, components)) {
+        logLookup({depth.get(), resource, 0, DccKeys::Uncompressed, 0, nullptr, true});
+        return depth;
+    }
     const auto depthBitsWidth = words.size() >= 4 ? ShaderRecompiler::DepthBitsTextureWidth(words[1], words[3]) : 0u;
     if (depthBitsWidth == 32u) {
         char text[160];
@@ -1665,6 +1670,7 @@ void VisitContentKey(const CompiledShader& shader, bool dataWords, bool movableB
         packBits(binding.imageDepthCompare);
         packBits(binding.imageAtomic);
         packBits(binding.samplerUnnormalized);
+        packBits(binding.samplerIntegerBorder);
         packBits(binding.imageUnnormalized);
         // Read-only elements are bound without a write set: an object built for one written set
         // must not serve a build with another (the variant implies it, this makes it explicit).
@@ -1699,7 +1705,7 @@ namespace {
 // of the reused ones, fast = every image proved current from stamps, full = the lookups were repeated.
 // Why the fast path left an object to the full walk (the "fast-fail by reason" counts).
 using FastFail = ShaderResources::FastFail;
-constexpr std::array<const char*, static_cast<std::size_t>(FastFail::Count)> FastFailNames{"no record", "collect", "pending image", "evicted image", "memory changed", "keys", "cleared view", "storage keys"};
+constexpr std::array<const char*, static_cast<std::size_t>(FastFail::Count)> FastFailNames{"no record", "collect", "pending image", "evicted image", "memory changed", "keys", "cleared view", "storage keys", "depth surface"};
 using OwnRefreshFallback = ShaderResources::OwnRefreshFallback;
 constexpr std::array<const char*, static_cast<std::size_t>(OwnRefreshFallback::Count)> OwnRefreshFallbackNames{"disabled", "snapshot texture", "cleared view", "foreign view", "surface key", "not imported", "uncached", "re-run failed"};
 
@@ -1851,7 +1857,7 @@ void ShaderResources::captureValidation() {
     };
     validatedTextures.assign(textures.size(), {});
     for (std::size_t i = 0; i < textures.size(); ++i) {
-        if (const auto* found = record(textures[i].get())) validatedTextures[i] = {found->resource, found->bytes, found->keys, found->generation, 0, found->source, true};
+        if (const auto* found = record(textures[i].get())) validatedTextures[i] = {found->resource, found->bytes, found->keys, found->generation, 0, found->source, found->depth, true};
     }
     lookupLog().clear();
 }
@@ -1907,6 +1913,10 @@ bool ShaderResources::fastRevalidate(std::uint64_t serialBefore, std::span<const
     for (std::size_t i = 0; i < textures.size(); ++i) {
         auto& surface = validatedTextures[i];
         if (!surface.valid) return fail(FastFail::NoRecord);
+        if (surface.depth) {
+            if (!DepthSurfaceHolds(context, surface.resource, textures[i].get())) return fail(FastFail::Depth);
+            continue;
+        }
         const auto address = surface.resource.baseAddress;
         const auto bytes = static_cast<std::size_t>(surface.bytes);
         surface.collected = GuestMemory::CollectWrites(address, bytes);
@@ -2025,6 +2035,10 @@ bool ShaderResources::fastRevalidateEach() {
     for (std::size_t i = 0; i < textures.size(); ++i) {
         auto& surface = validatedTextures[i];
         if (!surface.valid) return false;
+        if (surface.depth) {
+            if (!DepthSurfaceHolds(context, surface.resource, textures[i].get())) return false;
+            continue;
+        }
         const auto address = surface.resource.baseAddress;
         const auto bytes = static_cast<std::size_t>(surface.bytes);
         surface.collected = GuestMemory::CollectWrites(address, bytes);
@@ -2690,7 +2704,16 @@ std::size_t ShaderResources::addGuestBuffer(std::span<const std::uint32_t> words
     }
     Require(byteSize <= context.limits.maxStorageBufferRange, "shader buffer exceeds descriptor range limit");
     Require(byteSize <= std::numeric_limits<std::size_t>::max(), "shader buffer size exceeds host address space");
-    const auto size = static_cast<std::size_t>(byteSize);
+    auto size = static_cast<std::size_t>(byteSize);
+    if (const std::uint64_t stride = descriptor.Stride(); stride != 0) {
+        constexpr std::uint64_t GuestPageBytes = 0x4000;
+        const auto end = address + size;
+        const auto overhang = end % GuestPageBytes;
+        if (overhang != 0 && overhang < stride) {
+            const auto allocationEnd = RegisteredReadableEnd(address);
+            if (allocationEnd > address && allocationEnd < end && end - allocationEnd < stride) size = static_cast<std::size_t>(allocationEnd - address);
+        }
+    }
     Require(target == nullptr || !overlap(address, size, target->address, target->bytes), "shader buffer aliases the render target");
     // APS5_ALL_BUFFERS_WRITTEN=1: every element is noted as written, as before bufferWritten existed.
     static const bool allWritten = std::getenv("APS5_ALL_BUFFERS_WRITTEN") != nullptr;
@@ -2916,14 +2939,15 @@ void ShaderResources::addImageBinding(const ShaderRecompiler::DescriptorBinding&
             const auto words = std::span<const std::uint32_t>(binding.guestDescriptor).subspan(static_cast<std::size_t>(element) * elementWords, elementWords);
             const bool compareEnable = binding.samplerDepthCompare.at(element);
             const bool unnormalized = element < binding.samplerUnnormalized.size() && binding.samplerUnnormalized[element];
+            const bool integerBorder = element < binding.samplerIntegerBorder.size() && binding.samplerIntegerBorder[element];
             if (context.samplerCache != nullptr && !SamplerCacheDisabled()) {
-                samplers.push_back(context.samplerCache->Get(context, words, compareEnable, unnormalized, true));
+                samplers.push_back(context.samplerCache->Get(context, words, compareEnable, unnormalized, true, integerBorder));
             } else {
-                auto resource = DecodeSamplerResource(words, unnormalized, true);
+                auto resource = DecodeSamplerResource(words, unnormalized, true, integerBorder);
                 resource.compareEnable = compareEnable;
                 samplers.push_back(std::make_shared<Sampler>(context, resource));
             }
-            samplerSources.push_back({{words[0], words[1], words[2], words[3]}, compareEnable, unnormalized});
+            samplerSources.push_back({{words[0], words[1], words[2], words[3]}, compareEnable, unnormalized, integerBorder});
             item.imageAllocations.push_back(samplers.size() - 1);
         }
         Require(samplers.size() <= context.limits.maxDescriptorSetSamplers, "pipeline sampler descriptors exceed device limits");
@@ -3081,9 +3105,9 @@ void ShaderResources::applyAnisoOverride() {
         if (!variant.has_value()) continue;
         const auto& words = *variant;
         if (context.samplerCache != nullptr && !SamplerCacheDisabled()) {
-            samplers[index] = context.samplerCache->Get(context, words, source.compareEnable, source.unnormalized);
+            samplers[index] = context.samplerCache->Get(context, words, source.compareEnable, source.unnormalized, false, source.integerBorder);
         } else {
-            auto resource = DecodeSamplerResource(words, source.unnormalized);
+            auto resource = DecodeSamplerResource(words, source.unnormalized, false, source.integerBorder);
             resource.compareEnable = source.compareEnable;
             samplers[index] = std::make_shared<Sampler>(context, resource);
         }
@@ -3399,6 +3423,7 @@ std::shared_ptr<ShaderResources::DrawBindings> ShaderResources::PrepareDrawBindi
     }
     update(context.device, static_cast<std::uint32_t>(writes.size()), writes.data(), 0, nullptr);
     recorder.Keep(result);
+    for (const auto& snapshot : result->snapshots) recorder.KeepBytes(snapshot.buffer.get(), snapshot.buffer->Bytes().size());
     return result;
 }
 

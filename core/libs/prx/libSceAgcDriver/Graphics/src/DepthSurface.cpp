@@ -158,6 +158,10 @@ public:
     std::uint8_t clearStencil = 0;
     std::uint64_t htileAddress = 0;
     std::uint64_t htileGeneration = 0;
+    bool Holds(const Texture* texture) const {
+        return std::any_of(textures.begin(), textures.end(), [&](const auto& entry) { return entry.second.get() == texture; });
+    }
+
     const Context context;
     const DepthTarget target;
     VkImage image = VK_NULL_HANDLE;
@@ -311,6 +315,9 @@ std::shared_ptr<Texture> DepthSurfaceTexture(const Context& context, std::span<c
             trace("format-mismatch");
             return nullptr;
         }
+    } else if (BytesPerElement(resource.format) != 1u) {
+        trace("format-mismatch");
+        return nullptr;
     }
     auto texture = (*found)->Sampled(words, resource, components);
     trace("matched");
@@ -337,6 +344,17 @@ void NoteDepthMetadataFill(std::uint64_t address, std::size_t bytes, std::uint32
         const VkImageAspectFlags written = VK_IMAGE_ASPECT_DEPTH_BIT | (target.htileStencil ? VK_IMAGE_ASPECT_STENCIL_BIT : 0u);
         surface->pendingClear = (surface->pendingClear & ~written) | HtileFillClears(pattern, target.htileStencil);
     }
+}
+
+bool DepthSurfaceHolds(const Context& context, const GuestTextureResource& resource, const Texture* texture) {
+    if (resource.dimension != TextureDimension::k2D || resource.baseArray != 0) return false;
+    const auto address = resource.baseAddress;
+    std::lock_guard lock(surfacesMutex());
+    const auto& list = surfaces();
+    const auto found = std::find_if(list.rbegin(), list.rend(), [&](const auto& surface) {
+        return surface->context.device == context.device && (surface->target.address == address || (surface->target.stencilAddress != 0 && surface->target.stencilAddress == address));
+    });
+    return found != list.rend() && (*found)->Holds(texture);
 }
 
 bool DepthSurfaceAt(std::uint64_t address) {
