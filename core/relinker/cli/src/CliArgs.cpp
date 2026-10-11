@@ -8,7 +8,7 @@
 namespace Cli {
 
 const char* Usage() {
-    return "Usage: relinker [--help] [--windows | --macos] [--windows-diagnostics] [--windows-gui] [--skip-syscall-check] [--skip-sce-module | --sce-module-path <path>] [--guest-module-directory <relative-path>]... [--exclude-sce-module <file>]... [--to-intel] [--to-rosetta] [unused-filter=0|1|2] [--registry] [--rpath <path>] [--lazy-binding] [--autorun] <input.elf> <output.elf>\n"
+    return "Usage: relinker [--help] [--windows | --macos] [--windows-diagnostics] [--windows-gui] [--skip-syscall-check] [--skip-sce-module | --sce-module-path <path>] [--guest-module-directory <relative-path>]... [--module-dir <dir>]... [--exclude-sce-module <file>]... [--to-intel] [--to-rosetta] [unused-filter=0|1|2] [--registry] [--rpath <path>] [--lazy-binding] [--autorun] <input.elf> <output.elf>\n"
            "Example: relinker input.elf output.elf";
 }
 
@@ -39,6 +39,10 @@ Args ParseArgs(int argc, char* argv[]) {
             if (i + 1 >= argc)
                 throw std::runtime_error("--exclude-sce-module requires a file name");
             args.excludedSceModules.insert(argv[++i]);
+        } else if (arg == "--module-dir") {
+            if (i + 1 >= argc)
+                throw std::runtime_error("--module-dir requires a directory");
+            args.moduleDirectories.push_back(argv[++i]);
         } else if (arg == "--to-intel") {
             args.toIntel = true;
         } else if (arg == "--to-rosetta") {
@@ -84,6 +88,9 @@ Args ParseArgs(int argc, char* argv[]) {
 
     if (args.skipSceModule && !args.excludedSceModules.empty())
         throw std::runtime_error("--exclude-sce-module conflicts with --skip-sce-module");
+
+    if (args.skipSceModule && !args.moduleDirectories.empty())
+        throw std::runtime_error("--module-dir conflicts with --skip-sce-module");
 
     if (args.toWindows && args.toMacos)
         throw std::runtime_error("--windows conflicts with --macos");

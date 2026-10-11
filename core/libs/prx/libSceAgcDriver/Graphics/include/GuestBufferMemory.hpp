@@ -157,6 +157,7 @@ struct MirrorStats {
     std::uint64_t heapRefills = 0;
     std::uint64_t sweeps = 0;
     std::uint64_t heapChecks = 0;
+    std::uint64_t sparseBinds = 0;
 };
 MirrorStats MirrorCounters();
 void ClearImageMirrors(VkDevice device);
@@ -282,6 +283,7 @@ private:
         // Set when the region covers uncommitted pages: only the `backed` parts (possibly none) are guest
         // memory; the rest reads as zeros and is never stored.
         bool sparse = false;
+        bool sparseHeap = false;
         std::vector<std::pair<std::uint64_t, std::uint64_t>> backed {};
         std::uint64_t lastView = 0;
         std::uint64_t bufferEnd = 0;
@@ -336,11 +338,15 @@ private:
     void addCopiedRange(const CopiedRange& range);
     // The BDA table entry of an uploaded region.
     static ShaderRecompiler::BdaAbi::Range addressRange(const Region& region);
+    static std::uint64_t servedEnd(const Region& region);
     void validate(std::uint64_t address, std::size_t bytes) const;
     // The region of a descriptor-bound range (AddWritable/AddReadable), committed pages only. A
     // range inside a base region of the space adds nothing: the region serves it, as today's merge
     // of the two did.
     void addDescriptorRegion(std::uint64_t address, std::size_t bytes, bool atomic, bool swept);
+    static bool servesView(const Region& region, std::uint64_t view);
+    static bool sparseHeapCandidate(const Region& region);
+    bool bindSparseMirror(Region& region, const GuestAllocations::Lease& lease);
     // Gives a region a buffer of its own with its bytes (guest memory for host-backed and writable
     // ranges, plus the write-back's reference copy for a range a descriptor writes; else its snapshot).
     void copyRegion(Region& region, bool addressable);

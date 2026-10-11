@@ -3,6 +3,7 @@
 
 #include <set>
 #include <string>
+#include <vector>
 #include <cstdint>
 
 namespace Cli {
@@ -27,6 +28,7 @@ struct Args {
     std::string runPath = "$ORIGIN/libs";
     std::set<std::string> excludedSceModules;
     std::set<std::string> guestModuleDirectories;
+    std::vector<std::string> moduleDirectories;
 };
 
 Args ParseArgs(int argc, char* argv[]);

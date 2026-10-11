@@ -33,6 +33,7 @@ int APS5_VABI sceKernelFtruncate(int, long long);
 int APS5_VABI sceKernelTruncate_nid_postfix(const char*, long long);
 int APS5_VABI sceKernelUtimes_nid_postfix(const char*, const void*);
 int APS5_VABI open_nid_postfix(const char*, int, int);
+int APS5_VABI creat_nid_postfix(const char*, int);
 int APS5_VABI _open_nid_postfix(const char*, int, ...);
 int APS5_VABI close_nid_postfix(int);
 int APS5_VABI flock_nid_postfix(int, int);
@@ -113,6 +114,15 @@ int main() {
     Require(read_nid_postfix(descriptors[0], received, sizeof(received)) == sizeof(received));
     Require(std::memcmp(received, payload, sizeof(payload)) == 0);
     Require(read_nid_postfix(descriptors[0], received, sizeof(received)) == 0);
+    {
+        std::filesystem::remove("creat_probe.bin");
+        int created = creat_nid_postfix("creat_probe.bin", 0644);
+        Require(created >= 0 && write_nid_postfix(created, "abc", 3) == 3);
+        Require(close_nid_postfix(created) == 0 && std::filesystem::file_size("creat_probe.bin") == 3);
+        created = creat_nid_postfix("creat_probe.bin", 0644);
+        Require(created >= 0 && close_nid_postfix(created) == 0 && std::filesystem::file_size("creat_probe.bin") == 0);
+        Require(std::filesystem::remove("creat_probe.bin"));
+    }
     Require(close_nid_postfix(descriptors[0]) == 0);
     const auto root = std::filesystem::path("anyps5-filesystem-test-" +
         std::to_string(std::chrono::steady_clock::now().time_since_epoch().count()));

@@ -4,6 +4,7 @@
 #include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <new>
 #include <cstring>
 #include <string>
 #include <thread>
@@ -97,8 +98,8 @@ static void Check(bool value, int line) {
 #define Require(value) Check((value), __LINE__)
 
 struct Block {
-    explicit Block(std::uint64_t size) : bytes(size), memory(std::aligned_alloc(256, (size + 255) & ~std::uint64_t{255})) {}
-    ~Block() { std::free(memory); }
+    explicit Block(std::uint64_t size) : bytes(size), memory(::operator new((size + 255) & ~std::uint64_t{255}, std::align_val_t{256})) {}
+    ~Block() { ::operator delete(memory, std::align_val_t{256}); }
     std::uint64_t bytes;
     void* memory;
 };
