@@ -1652,9 +1652,40 @@ static void CheckAvailableDirectMemoryIsLargestFreeBlock() {
     Require(start == top && size == static_cast<std::size_t>(window));
 }
 
+#ifdef _WIN32
+static void CheckOptionalSharedAlias() {
+    constexpr std::size_t page = 0x4000;
+    std::int64_t physical = 0;
+    Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, page * 3, 0, 0, &physical) == 0);
+    void* mapped = nullptr;
+    Require(sceKernelMapDirectMemory(&mapped, page * 2, 3, 0, physical, 0) == 0);
+    const auto address = reinterpret_cast<std::uintptr_t>(mapped);
+    auto* alias = static_cast<unsigned char*>(GuestArena::GuestArenaTryMapAlias_nid_postfix(address, page * 2));
+    Require(alias != nullptr);
+    alias[page + 7] = 0x5a;
+    Require(static_cast<volatile unsigned char*>(mapped)[page + 7] == 0x5a);
+    GuestArena::GuestArenaUnmapAlias_nid_postfix(alias);
+    void* high = static_cast<unsigned char*>(mapped) + page;
+    Require(sceKernelMapDirectMemory(&high, page, 3, 0x10, physical + page * 2, 0) == 0);
+    Require(GuestArena::GuestArenaTryMapAlias_nid_postfix(address, page * 2) == nullptr);
+    alias = static_cast<unsigned char*>(GuestArena::GuestArenaTryMapAlias_nid_postfix(address + page, page));
+    Require(alias != nullptr);
+    alias[7] = 0xa5;
+    Require(static_cast<volatile unsigned char*>(high)[7] == 0xa5);
+    GuestArena::GuestArenaUnmapAlias_nid_postfix(alias);
+    bool refused = false;
+    try { GuestArena::GuestArenaMapAlias_nid_postfix(address, page * 2); }
+    catch (const std::runtime_error&) { refused = true; }
+    Require(refused);
+    Require(sceKernelMunmap(mapped, page * 2) == 0);
+    Require(sceKernelReleaseDirectMemory(physical, page * 3) == 0);
+}
+#endif
+
 int main() {
 #ifdef _WIN32
     _putenv_s("APS5_PIN_WAIT_MS", "1000");
+    CheckOptionalSharedAlias();
 #endif
     CheckAvailableDirectMemoryIsLargestFreeBlock();
     CheckVirtualQuerySplitFlexibleRanges();
