@@ -27,6 +27,7 @@ struct GuestRuntime {
     std::uint32_t ReadyRva = 0;
     std::vector<std::string> DeferredDependencies;
     std::vector<std::string> Names;
+    std::vector<std::string> UnmatchedImportModules;
 };
 
 }

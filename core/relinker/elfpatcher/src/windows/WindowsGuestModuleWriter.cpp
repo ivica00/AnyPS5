@@ -173,6 +173,7 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestI
     for (const auto slot : guest.InitArray) runtime.InitArrayRvas.push_back(image.GetRva(slot, 8));
     for (const auto slot : guest.FiniArray) runtime.FiniArrayRvas.push_back(image.GetRva(slot, 8));
     runtime.InitRva = guest.Init == 0 ? 0 : image.GetRva(guest.Init);
+    runtime.UnmatchedImportModules.assign(guest.Dynamic.UnmatchedImportModules.begin(), guest.Dynamic.UnmatchedImportModules.end());
     runtime.FiniRva = guest.Fini == 0 ? 0 : image.GetRva(guest.Fini);
     if (runtime.Deferred) {
         PeSection lifecycle{".aps5mod", AlignRva(entry + 6), SectionRead | SectionWrite | 0x40u, {}};
