@@ -83,7 +83,7 @@ class Check:
         return git("show", f"{self.head}:{path}")
 
     def code(self):
-        debt = [(text, links("docs/dev/TechnicalDebt.md", text)) for text in self.show("docs/dev/TechnicalDebt.md").splitlines()] if "docs/dev/TechnicalDebt.md" in self.tree else []
+        debt = silent_stub_debt(self.show("docs/dev/TechnicalDebt.md")) if "docs/dev/TechnicalDebt.md" in self.tree else []
         exports = {}
         for path, lines in self.files(lambda p: p.suffix in CPP):
             core = path.startswith("core/") and "tests" not in PurePosixPath(path).parts
@@ -127,6 +127,8 @@ class Check:
 
     def build(self):
         for path, lines in self.files(lambda p: p.name == "CMakeLists.txt" or p.suffix == ".cmake"):
+            if path == "cmake/SystemDeps.cmake":
+                continue
             for number, text in lines:
                 if SYSTEM_DEPENDENCY.search(text.split("#", 1)[0]):
                     self.report("system-dependency", path, number, text.strip())
@@ -191,6 +193,22 @@ def links(path, text):
         target = target.split("#", 1)[0].split("?", 1)[0]
         result.append((target, posixpath.normpath(target.lstrip("/") if target.startswith("/") else str(PurePosixPath(path).parent / target))))
     return result
+
+
+def silent_stub_debt(text):
+    debt = []
+    section_level = 0
+    for line in text.splitlines():
+        heading = re.match(r"^(#{1,6})\s+(.+?)\s*$", line)
+        if heading:
+            level = len(heading[1])
+            if heading[2] == "Silent stubs":
+                section_level = level
+            elif level <= section_level:
+                section_level = 0
+        if section_level:
+            debt.append((line, links("docs/dev/TechnicalDebt.md", line)))
+    return debt
 
 
 def listed(debt, name, path):

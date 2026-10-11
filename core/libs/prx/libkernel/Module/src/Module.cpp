@@ -9,6 +9,7 @@
 #include "prx/libkernel/DirectMemory/DirectMemory.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
 #include "prx/libkernel/Module/EhFrame.hpp"
+#include "prx/libkernel/Module/ModuleArgs.hpp"
 #ifdef _WIN32
 #include <windows.h>
 #include <psapi.h>
@@ -180,10 +181,6 @@ int APS5_VABI sceKernelGetModuleInfoForUnwind(uint64_t addr, int flags, ModuleIn
 
 namespace {
 
-struct PendingModuleArgs {
-    std::size_t args = 0;
-    const void* argp = nullptr;
-};
 thread_local PendingModuleArgs pendingModuleArgs;
 thread_local int pendingModuleInitResult = 0;
 
