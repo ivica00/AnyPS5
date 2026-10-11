@@ -144,6 +144,15 @@ endforeach()
 add_custom_target(libs DEPENDS ${PATCHED_OUTPUTS})
 
 if(BUILD_TESTING)
+    add_test_executable(guest_posix_scalar_io_tests tests/GuestPosixScalarIo.cpp)
+    target_include_directories(guest_posix_scalar_io_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_posix_scalar_io_tests PRIVATE libkernel libc)
+    configure_windows_unwind(guest_posix_scalar_io_tests)
+    add_test(NAME guest_posix_scalar_io COMMAND guest_posix_scalar_io_tests)
+    if(WIN32)
+        set_tests_properties(guest_posix_scalar_io PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
     find_package(Python3 QUIET COMPONENTS Interpreter)
     if(Python3_Interpreter_FOUND)
         add_test(NAME nid_patcher_macho COMMAND ${Python3_EXECUTABLE}
@@ -279,6 +288,16 @@ if(BUILD_TESTING)
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSaveData>")
         set_tests_properties(savedata_native_write_replacement PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libSceSaveData.native>")
+    endif()
+
+    add_test_executable(guest_ppsa01530_exports_tests tests/GuestPPSA01530Exports.cpp)
+    target_include_directories(guest_ppsa01530_exports_tests PRIVATE ${CMAKE_CURRENT_SOURCE_DIR})
+    target_link_libraries(guest_ppsa01530_exports_tests PRIVATE libkernel libSceJson2 libSceNet libScePad libc)
+    configure_windows_unwind(guest_ppsa01530_exports_tests)
+    add_test(NAME guest_ppsa01530_exports COMMAND guest_ppsa01530_exports_tests)
+    if(WIN32)
+        set_tests_properties(guest_ppsa01530_exports PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
     endif()
 
     add_test_executable(guest_posix_random_tests tests/GuestPosixRandom.cpp)

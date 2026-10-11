@@ -279,7 +279,7 @@ void testEndOfPipeLabelsWithoutWork() {
 }
 
 void testLabelStoredSinceSubmission() {
-    alignas(64) static volatile std::uint32_t gate = 0, label = 0, done = 0, late = 0;
+    alignas(64) static volatile std::uint32_t gate = 0, label = 0, done = 0, late = 0, waiting = 0;
     submit(0x20, commands(waitEqual(&gate, 1), waitEqual(&label, 1), writeData(&done, 1)));
     submit(0, commands(writeData(&label, 1)));
     waitFor(&label, 1, "producer label never landed");
@@ -287,13 +287,17 @@ void testLabelStoredSinceSubmission() {
     gate = 1;
     check(waitFor(&done, 1, "consumer never passed its waits") < std::chrono::milliseconds(500), "a label stored after the wait's submission did not satisfy it");
     AgcDriverWaitIdle_nid_postfix();
-    submit(0x20, commands(waitEqual(&label, 1), writeData(&late, 1)));
-    check(waitFor(&late, 1, "consumer never passed its wait") >= std::chrono::milliseconds(900), "a label stored before the wait's submission satisfied it");
+    submit(0x20, commands(writeData(&waiting, 1), waitEqual(&label, 1), writeData(&late, 1)));
+    waitFor(&waiting, 1, "consumer never reached its label wait");
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    check(late == 0, "a label stored before the wait's submission satisfied it or the wait expired");
+    submit(0, commands(writeData(&label, 1)));
+    waitFor(&late, 1, "consumer did not resume after a new producer label");
     AgcDriverWaitIdle_nid_postfix();
 }
 
 void testWideLabelStoredSinceSubmission() {
-    alignas(64) static volatile std::uint32_t gate = 0, done = 0, late = 0;
+    alignas(64) static volatile std::uint32_t gate = 0, done = 0, late = 0, waiting = 0;
     alignas(64) static volatile std::uint32_t label[2] = {0, 0x5eed};
     submit(0x20, commands(waitEqual(&gate, 1), waitEqual64(label, 1, 0xffffffffu), writeData(&done, 1)));
     submit(0, commands(writeData(label, 1)));
@@ -303,17 +307,21 @@ void testWideLabelStoredSinceSubmission() {
     check(waitFor(&done, 1, "consumer never passed its waits") < std::chrono::milliseconds(500), "a 32-bit label stored after a low-dword 64-bit wait's submission did not satisfy it");
     AgcDriverWaitIdle_nid_postfix();
     gate = 0;
-    submit(0x20, commands(waitEqual(&gate, 1), waitEqual64(label, 1, ~0ull), writeData(&late, 1)));
+    submit(0x20, commands(waitEqual(&gate, 1), writeData(&waiting, 1), waitEqual64(label, 1, ~0ull), writeData(&late, 1)));
     submit(0, commands(writeData(label, 1)));
     waitFor(label, 1, "producer label never landed");
     label[0] = 0;
     gate = 1;
-    check(waitFor(&late, 1, "consumer never passed its wait") >= std::chrono::milliseconds(900), "a 32-bit store satisfied a 64-bit wait whose high dword never matched");
+    waitFor(&waiting, 1, "consumer never reached its wide label wait");
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    check(late == 0, "a mismatched high dword satisfied the 64-bit wait or the wait expired");
+    submit(0, commands(writeData(label + 1, 0), writeData(label, 1)));
+    waitFor(&late, 1, "consumer did not resume after a matching 64-bit label");
     AgcDriverWaitIdle_nid_postfix();
 }
 
 void testLabelHeldAtSubmission() {
-    alignas(64) static volatile std::uint32_t gate = 0, label = 1, done = 0, reset = 0;
+    alignas(64) static volatile std::uint32_t gate = 0, label = 1, done = 0, reset = 0, waiting = 0;
     submit(0x20, commands(waitEqual(&gate, 1), waitEqual(&label, 1), writeData(&done, 1)));
     label = 0;
     gate = 1;
@@ -321,9 +329,13 @@ void testLabelHeldAtSubmission() {
     AgcDriverWaitIdle_nid_postfix();
     gate = 0;
     label = 1;
-    submit(0x20, commands(waitEqual(&gate, 1), writeData(&label, 0), waitEqual(&label, 1), writeData(&reset, 1)));
+    submit(0x20, commands(waitEqual(&gate, 1), writeData(&label, 0), writeData(&waiting, 1), waitEqual(&label, 1), writeData(&reset, 1)));
     gate = 1;
-    check(waitFor(&reset, 1, "consumer never passed its wait") >= std::chrono::milliseconds(900), "a label its own queue stored first counted as held at the submission");
+    waitFor(&waiting, 1, "consumer never reached its reset label wait");
+    std::this_thread::sleep_for(std::chrono::milliseconds(1200));
+    check(reset == 0, "a label reset by its own queue satisfied the wait or the wait expired");
+    submit(0x28, commands(writeData(&label, 1)));
+    waitFor(&reset, 1, "consumer did not resume after another queue restored the label");
     AgcDriverWaitIdle_nid_postfix();
 }
 

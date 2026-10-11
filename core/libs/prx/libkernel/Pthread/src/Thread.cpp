@@ -23,6 +23,7 @@
 #ifndef _WIN32
 #include <cerrno>
 #include <csetjmp>
+#include <csignal>
 #include <pthread.h>
 #include <sys/mman.h>
 #include <unistd.h>
@@ -44,6 +45,9 @@ struct ThreadArgs {
     PthreadEntry entry;
     void* arg;
     PthreadPrivate* self;
+#ifndef _WIN32
+    sigset_t signalMask;
+#endif
 };
 
 static std::atomic<thread_dtors_func_t> threadDtors{nullptr};
@@ -369,7 +373,13 @@ static void RunThread(std::unique_ptr<ThreadArgs> args) {
     TimedWait::BindThreadWaitState(&self->waitCount);
     CurrentGuestState().current = self;
     RegisterStack(self);
+#ifndef _WIN32
+    const sigset_t signalMask = args->signalMask;
+#endif
     args.reset();
+#ifndef _WIN32
+    pthread_sigmask(SIG_SETMASK, &signalMask, nullptr);
+#endif
     finishThread(self, entry(arg));
     CurrentGuestState().current = nullptr;
 }
@@ -551,14 +561,22 @@ int APS5_VABI scePthreadCreate(Pthread* thread, const PthreadAttr* attr, Pthread
     if (p->stackSize < 16384 || p->stackSize > std::numeric_limits<std::size_t>::max() - reserve - HOST_STACK_MARGIN - page)
         throw std::runtime_error("scePthreadCreate: invalid stack size");
     const std::size_t nativeStack = (p->stackSize + reserve + HOST_STACK_MARGIN + page - 1) / page * page;
+    sigset_t creatorMask;
+    pthread_sigmask(SIG_SETMASK, nullptr, &creatorMask);
+    args->signalMask = creatorMask;
     auto native = std::make_unique<NativeThreadArgs>(NativeThreadArgs{std::move(args), start.get_future(), {}});
     auto initialized = native->initialized.get_future();
     pthread_attr_t nativeAttr;
     if (const int result = pthread_attr_init(&nativeAttr); result != 0)
         throw std::system_error(result, std::generic_category(), "Creating guest thread");
     int created = pthread_attr_setstacksize(&nativeAttr, nativeStack);
-    if (created == 0)
+    if (created == 0) {
+        sigset_t allSignals;
+        sigfillset(&allSignals);
+        pthread_sigmask(SIG_BLOCK, &allSignals, nullptr);
         created = pthread_create(&p->hostThread, &nativeAttr, StartNativeThread, native.get());
+        pthread_sigmask(SIG_SETMASK, &creatorMask, nullptr);
+    }
     pthread_attr_destroy(&nativeAttr);
     if (created != 0)
         throw std::system_error(created, std::generic_category(), "Creating guest thread");
@@ -662,6 +680,7 @@ Pthread APS5_VABI scePthreadSelf() {
         adoptedThread->_adopted = true;
         BindHostCpuClock(adoptedThread.get());
         adoptedThread->threadId = std::this_thread::get_id();
+        adoptedThread->hostThread = pthread_self();
         SetStackFromHost(adoptedThread.get());
         CurrentGuestState().current = adoptedThread.get();
     }

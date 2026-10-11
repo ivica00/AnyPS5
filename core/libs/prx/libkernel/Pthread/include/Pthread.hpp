@@ -14,6 +14,9 @@
 #include <shared_mutex>
 #include <string>
 #include <thread>
+#ifndef _WIN32
+#include <pthread.h>
+#endif
 
 #ifndef _WIN32
 #include <pthread.h>
