@@ -36,6 +36,7 @@ float APS5_VABI tanf_nid_postfix(float);
 float APS5_VABI log10f_nid_postfix(float);
 float APS5_VABI logbf_nid_postfix(float);
 double APS5_VABI exp2_nid_postfix(double);
+float APS5_VABI __powisf2_nid_postfix(float, int);
 double APS5_VABI ldexp_nid_postfix(double, int);
 double APS5_VABI scalbn_nid_postfix(double, int);
 float APS5_VABI scalbnf_nid_postfix(float, int);
@@ -268,4 +269,19 @@ int main() {
     Require(negativeDenominator.quot == -3 && negativeDenominator.rem == 1);
     const auto minimum = div_nid_postfix(std::numeric_limits<int>::min(), 10);
     Require(minimum.quot == -214748364 && minimum.rem == -8);
+    Require(__powisf2_nid_postfix(2.0f, 10) == 1024.0f);
+    Require(__powisf2_nid_postfix(2.0f, -10) == 0.0009765625f);
+    Require(__powisf2_nid_postfix(-2.0f, 3) == -8.0f);
+    Require(__powisf2_nid_postfix(-2.0f, -3) == -0.125f);
+    Require(__powisf2_nid_postfix(-2.0f, 4) == 16.0f);
+    Require(__powisf2_nid_postfix(0.0f, 0) == 1.0f);
+    Require(__powisf2_nid_postfix(std::numeric_limits<float>::quiet_NaN(), 0) == 1.0f);
+    Require(std::isnan(__powisf2_nid_postfix(std::numeric_limits<float>::quiet_NaN(), 1)));
+    Require(__powisf2_nid_postfix(-1.0f, std::numeric_limits<int>::min()) == 1.0f);
+    Require(__powisf2_nid_postfix(-1.0f, std::numeric_limits<int>::max()) == -1.0f);
+    Require(__powisf2_nid_postfix(2.0f, std::numeric_limits<int>::min()) == 0.0f);
+    Require(std::isinf(__powisf2_nid_postfix(0.0f, -1)));
+    Require(std::signbit(__powisf2_nid_postfix(-0.0f, 3)));
+    Require(std::isinf(__powisf2_nid_postfix(-0.0f, -3)) && std::signbit(__powisf2_nid_postfix(-0.0f, -3)));
+    Require(__powisf2_nid_postfix(2.0f, -127) == 0x1p-127f);
 }

@@ -174,6 +174,21 @@ std::vector<std::uint8_t> GuestModuleWriter::WriteWindows(const Relinker::GuestI
     for (const auto slot : guest.FiniArray) runtime.FiniArrayRvas.push_back(image.GetRva(slot, 8));
     runtime.InitRva = guest.Init == 0 ? 0 : image.GetRva(guest.Init);
     runtime.FiniRva = guest.Fini == 0 ? 0 : image.GetRva(guest.Fini);
+    if (runtime.Deferred) {
+        PeSection lifecycle{".aps5mod", AlignRva(entry + 6), SectionRead | SectionWrite | 0x40u, {}};
+        Io::AppendU32(lifecycle.Data, 1);
+        Io::AppendU32(lifecycle.Data, 0);
+        Io::AppendU32(lifecycle.Data, runtime.InitRva);
+        Io::AppendU32(lifecycle.Data, runtime.FiniRva);
+        Io::AppendU32(lifecycle.Data, CheckedRva(runtime.InitArrayRvas.size()));
+        Io::AppendU32(lifecycle.Data, CheckedRva(runtime.FiniArrayRvas.size()));
+        Io::AppendU32(lifecycle.Data, CheckedRva(runtime.DeferredDependencies.size()));
+        for (const auto slot : runtime.InitArrayRvas) Io::AppendU32(lifecycle.Data, slot);
+        for (const auto slot : runtime.FiniArrayRvas) Io::AppendU32(lifecycle.Data, slot);
+        for (const auto& dependency : runtime.DeferredDependencies) Io::AppendString(lifecycle.Data, dependency);
+        runtime.ReadyRva = lifecycle.Rva + 4;
+        sections.push_back(std::move(lifecycle));
+    }
     auto result = WindowsPeWriter().Write(sections, entry, directories);
     const auto characteristics = Io::ReadU16(result, 0x80 + 22);
     Io::WriteU16(result, 0x80 + 22, static_cast<std::uint16_t>((characteristics | 0x2000) & ~1u));

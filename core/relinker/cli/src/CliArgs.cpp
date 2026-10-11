@@ -7,7 +7,7 @@
 namespace Cli {
 
 const char* Usage() {
-    return "Usage: relinker [--help] [--windows | --macos] [--windows-diagnostics] [--windows-gui] [--skip-syscall-check] [--skip-sce-module | --sce-module-path <path>] [--exclude-sce-module <file>]... [--to-intel] [unused-filter=0|1|2] [--registry] [--rpath <path>] [--lazy-binding] [--autorun] <input.elf> <output.elf>\n"
+    return "Usage: relinker [--help] [--windows | --macos] [--windows-diagnostics] [--windows-gui] [--skip-syscall-check] [--skip-sce-module | --sce-module-path <path>] [--guest-module-directory <relative-path>]... [--exclude-sce-module <file>]... [--to-intel] [unused-filter=0|1|2] [--registry] [--rpath <path>] [--lazy-binding] [--autorun] <input.elf> <output.elf>\n"
            "Example: relinker input.elf output.elf";
 }
 
@@ -29,6 +29,11 @@ Args ParseArgs(int argc, char* argv[]) {
             if (i + 1 >= argc || std::string(argv[i + 1]).empty() || std::string(argv[i + 1]).starts_with("--")) throw std::runtime_error("--sce-module-path requires a nonempty path");
             args.sceModulePath = argv[++i];
             sceModulePathSpecified = true;
+        } else if (arg == "--guest-module-directory") {
+            if (i + 1 >= argc || std::string(argv[i + 1]).empty() || std::string(argv[i + 1]).starts_with("--")) throw std::runtime_error("--guest-module-directory requires a nonempty relative path");
+            const auto path = std::filesystem::path(argv[++i]).lexically_normal();
+            if (path.has_root_path() || path.empty() || path == "." || *path.begin() == "..") throw std::runtime_error("--guest-module-directory must be inside the module parent directory");
+            args.guestModuleDirectories.insert(path.generic_string());
         } else if (arg == "--exclude-sce-module") {
             if (i + 1 >= argc)
                 throw std::runtime_error("--exclude-sce-module requires a file name");
@@ -71,6 +76,7 @@ Args ParseArgs(int argc, char* argv[]) {
     }
 
     if (args.skipSceModule && sceModulePathSpecified) throw std::runtime_error("--sce-module-path conflicts with --skip-sce-module");
+    if (args.skipSceModule && !args.guestModuleDirectories.empty()) throw std::runtime_error("--guest-module-directory conflicts with --skip-sce-module");
 
     if (args.skipSceModule && !args.excludedSceModules.empty())
         throw std::runtime_error("--exclude-sce-module conflicts with --skip-sce-module");

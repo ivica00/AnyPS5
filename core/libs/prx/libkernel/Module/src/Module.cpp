@@ -234,12 +234,16 @@ KernelModule APS5_VABI sceKernelLoadStartModule(const char* module_file_name, si
 }
 
 int APS5_VABI sceKernelStopUnloadModule(KernelModule handle, size_t args, const void* argp, uint32_t flags, const KernelUnloadModuleOpt* opt, int* res) {
- (void)args;
- (void)argp;
  (void)flags;
  (void)opt;
  if (res) *res = 0;
- return dlclose_nid_postfix(reinterpret_cast<void*>(static_cast<intptr_t>(handle))) == 0 ? 0 : SCE_KERNEL_ERROR_ESRCH;
+ pendingModuleArgs = {args, argp};
+ pendingModuleInitResult = 0;
+ const int closed = dlclose_nid_postfix(reinterpret_cast<void*>(static_cast<intptr_t>(handle)));
+ if (res) *res = pendingModuleInitResult;
+ pendingModuleArgs = {};
+ pendingModuleInitResult = 0;
+ return closed == 0 ? 0 : SCE_KERNEL_ERROR_ESRCH;
 }
 
 }

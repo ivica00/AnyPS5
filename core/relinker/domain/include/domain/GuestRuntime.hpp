@@ -23,6 +23,9 @@ struct GuestRuntime {
     std::uint32_t InitRva = 0;
     std::uint32_t FiniRva = 0;
     bool UsePlatformTlsResolver = true;
+    bool Deferred = false;
+    std::uint32_t ReadyRva = 0;
+    std::vector<std::string> DeferredDependencies;
     std::vector<std::string> Names;
 };
 

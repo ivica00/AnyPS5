@@ -28,6 +28,18 @@ float APS5_VABI tanf_nid_postfix(float x) { return std::tan(x); }
 float APS5_VABI log10f_nid_postfix(float x) { return std::log10(x); }
 float APS5_VABI logbf_nid_postfix(float x) { return std::logb(x); }
 double APS5_VABI exp2_nid_postfix(double x) { return std::exp2(x); }
+
+float APS5_VABI __powisf2_nid_postfix(float base, int exponent) {
+    const bool reciprocal = exponent < 0;
+    float result = 1.0f;
+    for (;;) {
+        if (exponent % 2 != 0) result *= base;
+        exponent /= 2;
+        if (exponent == 0) break;
+        base *= base;
+    }
+    return reciprocal ? 1.0f / result : result;
+}
 double APS5_VABI ldexp_nid_postfix(double x, int exponent) { return std::ldexp(x, exponent); }
 double APS5_VABI scalbn_nid_postfix(double x, int exponent) { return std::scalbn(x, exponent); }
 float APS5_VABI scalbnf_nid_postfix(float x, int exponent) { return std::scalbn(x, exponent); }

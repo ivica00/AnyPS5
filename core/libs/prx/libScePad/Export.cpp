@@ -73,7 +73,11 @@ int APS5_VABI scePadGetControllerInformation(int handle, PadControllerInformatio
 }
 
 int APS5_VABI scePadGetHandle(int user_id, int type, int index) {
- if (!g_opened || !ValidPort(user_id, type, index)) return PAD_ERROR_DEVICE_NO_HANDLE;
+ if (!g_opened || !ValidPort(user_id, type, index)) {
+  APS5_LOG_OUT("Pad: scePadGetHandle user_id=0x%x type=%d index=%d -> NO_HANDLE", user_id, type, index);
+  return PAD_ERROR_DEVICE_NO_HANDLE;
+ }
+ APS5_LOG_OUT("Pad: scePadGetHandle user_id=0x%x type=%d index=%d -> HANDLE", user_id, type, index);
  return PAD_HANDLE;
 }
 
@@ -89,6 +93,7 @@ int APS5_VABI scePadGetInfo_nid_postfix(PadInfo* info) {
  slot.deviceType = PAD_DEVICE_TYPE_DUAL_SENSE;
  slot.connectType = PAD_CONNECT_TYPE_BLUETOOTH;
  std::memcpy(slot.bluetoothMacAddress, PAD_BD_ADDRESS, sizeof(slot.bluetoothMacAddress));
+ APS5_LOG_OUT("%s", "Pad: scePadGetInfo -> slot[0]: deviceType=DUAL_SENSE connectType=BT status=1");
  return PAD_OK;
 }
 
@@ -128,15 +133,18 @@ int APS5_VABI scePadSetParticularMode(bool mode) {
 
 int APS5_VABI scePadInit_nid_postfix(void) {
  Pad::Initialize();
+ APS5_LOG_OUT("%s", "Pad: scePadInit initialized");
  return PAD_OK;
 }
 
 int APS5_VABI scePadOpen_nid_postfix(int userId, int type, int index, const void* param) {
  (void)param;
  if (!ValidPort(userId, type, index)) {
+  APS5_LOG_OUT("Pad: scePadOpen invalid port userId=0x%x type=%d index=%d", userId, type, index);
   return PAD_ERROR_INVALID_ARG;
  }
  g_opened = true;
+ APS5_LOG_OUT("Pad: scePadOpen succeeded userId=0x%x type=%d index=%d -> handle=%d", userId, type, index, PAD_HANDLE);
  return PAD_HANDLE;
 }
 
@@ -161,7 +169,16 @@ int APS5_VABI scePadReadState(int handle, PadData* data);
 int APS5_VABI scePadRead_nid_postfix(int handle, PadData* data, int num) {
     if (handle != PAD_HANDLE) return PAD_ERROR_INVALID_HANDLE;
     if (data == nullptr || num <= 0) APS5_INVALID_ARG_EX;
-    return Pad::ReadStates(data, num);
+    const int count = Pad::ReadStates(data, num);
+    static std::atomic<int> readCalls{0};
+    const int c = readCalls.fetch_add(1);
+    if (count > 0 && data[0].buttons != 0) {
+        APS5_LOG_OUT("Pad: scePadRead detected buttons=0x%x samples=%d", data[0].buttons, count);
+    } else if (c < 5 || (c % 300 == 0)) {
+        APS5_LOG_OUT("Pad: scePadRead #%d -> %d samples (connected=%d buttons=0x%x)",
+            c, count, count > 0 ? (int)data[0].connected : -1, count > 0 ? data[0].buttons : 0);
+    }
+    return count;
 }
 
 int APS5_VABI scePadReadState(int handle, PadData* data) {
@@ -169,6 +186,14 @@ int APS5_VABI scePadReadState(int handle, PadData* data) {
  if (data == nullptr) APS5_INVALID_ARG_EX;
 
  *data = Pad::ReadState();
+ static std::atomic<int> stateCalls{0};
+ const int c = stateCalls.fetch_add(1);
+ if (data->buttons != 0) {
+     APS5_LOG_OUT("Pad: scePadReadState detected buttons=0x%x", data->buttons);
+ } else if (c < 5 || (c % 300 == 0)) {
+     APS5_LOG_OUT("Pad: scePadReadState #%d connected=%d buttons=0x%x",
+         c, (int)data->connected, data->buttons);
+ }
 
  return 0;
 }

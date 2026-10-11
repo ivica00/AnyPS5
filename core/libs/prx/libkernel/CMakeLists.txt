@@ -159,6 +159,17 @@ if(BUILD_TESTING)
         set_target_properties(guest_dynamic_loader_tests PROPERTIES ENABLE_EXPORTS ON)
     endif()
     add_test(NAME guest_dynamic_loader COMMAND guest_dynamic_loader_tests $<TARGET_FILE_NAME:guest_module_fixture>)
+    if(WIN32 AND Python3_Interpreter_FOUND)
+        add_test_executable(guest_deferred_module_tests ${LIBS_INCLUDE_DIR}/tests/GuestDeferredModule.cpp)
+        target_include_directories(guest_deferred_module_tests PRIVATE ${LIBS_INCLUDE_DIR})
+        target_link_libraries(guest_deferred_module_tests PRIVATE libkernel libc)
+        configure_windows_unwind(guest_deferred_module_tests)
+        add_test(NAME guest_deferred_module COMMAND ${Python3_EXECUTABLE}
+            ${PROJECT_SOURCE_DIR}/core/relinker/relinker/tests/test_windows_deferred_module.py
+            $<TARGET_FILE:relinker> $<TARGET_FILE:guest_deferred_module_tests>)
+        set_tests_properties(guest_deferred_module PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libkernel>")
+    endif()
     set_tests_properties(guest_dynamic_loader PROPERTIES
         WORKING_DIRECTORY "$<TARGET_FILE_DIR:guest_module_fixture>")
     if(WIN32)

@@ -146,7 +146,7 @@ PadData readState() {
 
     data.connected = true;
     data.connected_count = 1;
-    data.timestamp = timestamp;
+    data.timestamp = now;
 
     std::uint8_t touchNum = 0;
     for (int i = 0; i < 2; ++i) {
@@ -185,6 +185,13 @@ int Pad::ReadStates(PadData* data, int count) {
     if (failure) std::rethrow_exception(failure);
     if (!initialized) throw std::runtime_error("Pad: read before initialization");
     if (data == nullptr || count <= 0) throw std::invalid_argument("Pad: invalid sample buffer");
+    if (samples.empty()) {
+        if (state.deviceKind != 0) {
+            data[0] = readState();
+            return 1;
+        }
+        return 0;
+    }
     const int available = std::min(count, static_cast<int>(samples.size()));
     for (int i = 0; i < available; ++i) {
         data[i] = samples.front();
