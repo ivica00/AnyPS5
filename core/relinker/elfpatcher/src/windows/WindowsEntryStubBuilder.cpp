@@ -180,6 +180,8 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
     for (std::size_t index = guestModules.size(); index < libraries.size(); ++index) {
         if (unmatched.contains(stem(libraries[index]))) imported[index] = true;
     }
+    const bool unscopedImports = std::any_of(imports.begin(), imports.end(), [](const auto& import) { return import.Library.empty(); });
+    const auto shouldLoad = [&](const std::size_t index) { return index < guestModules.size() || imported[index] || unscopedImports; };
 
     const auto lastError = reserve(4);
     const auto errorDigits = reserve(11);
@@ -359,7 +361,7 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
     }
 
     for (std::size_t index = 0; index < libraries.size(); ++index) {
-        if (index >= guestModules.size() && !imported[index]) continue;
+        if (!shouldLoad(index)) continue;
         if (absolutePath && index >= guestModules.size()) {
             code.Rip({0x48, 0x8d, 0x0d}, libraryPaths[index]);
         } else {
@@ -391,6 +393,12 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
         code.Emit({0x48, 0x85, 0xc0});
         const auto loadSucceeded = code.Branch({0x0f, 0x85});
         captureLastError();
+        std::optional<std::size_t> unusedMissing;
+        if (index >= guestModules.size() && !imported[index]) {
+            code.Rip({0x8b, 0x05}, lastError);
+            code.Emit({0x83, 0xf8, 0x7e});
+            unusedMissing = code.Branch({0x0f, 0x84});
+        }
         writeString(loadFailed, true);
         writeString(failedModule, true);
         writeString(resolvedPaths[index], true);
@@ -407,6 +415,12 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
 
         if (dependencyDiagnostics) {
             writeString(loaded);
+        }
+        if (unusedMissing) {
+            const auto next = code.Branch({0xe9});
+            code.PatchBranch(*unusedMissing, code.GetRva());
+            if (dependencyDiagnostics) writeString(skippedModule);
+            code.PatchBranch(next, code.GetRva());
         }
     }
 
@@ -524,7 +538,7 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
             code.PatchBranch(branch, code.GetRva());
         writeString(searched, true);
         for (std::size_t index = 0; index < resolvedPaths.size(); ++index) {
-            if (index >= guestModules.size() && !imported[index]) continue;
+            if (!shouldLoad(index)) continue;
             writeString(indent, true);
             writeString(resolvedPaths[index], true);
             writeString(newline, true);

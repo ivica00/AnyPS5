@@ -227,6 +227,26 @@ def main():
 
         check_internal_guest_libc(convert, work, relinker)
 
+        result, native_source = convert('unscoped-native-provider', 'a.prx')
+        assert result.returncode == 0, result.stderr
+        native_image = (native_source.parent / 'app0' / 'prx' / 'a.prx.guest.prx').read_bytes()
+        for name, symbol, module_name in [('legacy-host', 'shared', None),
+                                           ('unmatched-host', 'shared#A#B', 'libHostUtil')]:
+            case = work / name
+            (case / 'prx').mkdir(parents=True)
+            (case / 'libs').mkdir()
+            (case / 'libs' / 'libHost.prx').write_bytes(native_image)
+            source = case / 'input.elf'
+            source.write_bytes(executable('libHost.prx', symbol, module_name,
+                                         extra_dependencies=('unused.prx',)))
+            output = case / 'output.exe'
+            result = subprocess.run([str(relinker), '--windows', str(source), str(output)],
+                                    capture_output=True, text=True, timeout=30)
+            assert result.returncode == 0, result.stderr
+            if os.name == 'nt':
+                run = subprocess.run([str(output)], capture_output=True, text=True, timeout=30)
+                assert run.returncode == 11, (name, run.returncode, run.stdout, run.stderr)
+
         for filename, module_name in [('foo.native.prx', 'foo_native'),
                                       ('libSceFont-module.prx', 'libSceFont')]:
             result, output = convert(module_name, filename, guest_owner=filename,
