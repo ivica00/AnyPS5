@@ -14,6 +14,7 @@
 #include <cinttypes>
 
 #include "prx/libc/include/General.hpp"
+#include "prx/libc/include/SonyCrt.hpp"
 #include "prx/libc/include/specifics/gcc/AtomicOps.hpp"
 #include "prx/libc/include/FileStream.hpp"
 
@@ -159,8 +160,8 @@ void APS5_VABI _Unlocksyslock_nid_postfix() {
     g_sysLock.unlock();
 }
 
-unsigned __int128 APS5_VABI __udivti3_nid_postfix(unsigned __int128 a, unsigned __int128 b) {
-    return a / b;
+unsigned __int128 APS5_VABI __udivti3_nid_postfix(unsigned __int128 dividend, unsigned __int128 divisor) {
+    return SonyUdivti3(dividend, divisor);
 }
 
 }
