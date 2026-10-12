@@ -87,7 +87,8 @@ private:
     void freeBlock(SlabBlock& block) noexcept;
     struct Slot {
         BufferAllocation allocation;
-        std::uint64_t lastUse;
+        Slot* older = nullptr;
+        Slot* newer = nullptr;
     };
     struct SlotKey {
         std::size_t bytes;
@@ -105,6 +106,8 @@ private:
     // from Take).
     struct Tier {
         std::unordered_map<SlotKey, std::deque<Slot>, SlotKeyHash> free;
+        Slot* oldest = nullptr;
+        Slot* newest = nullptr;
         std::size_t slots = 0;
         VkDeviceSize retainedBytes = 0;
         VkDeviceSize budget = 0;
@@ -124,6 +127,7 @@ private:
     // caller destroys those after releasing the mutex, so builds taking buffers on other threads
     // do not wait behind the Vulkan destroy calls. Nothing changes when the vector cannot grow.
     void evictOldest(Tier& tier, std::vector<BufferAllocation>& evicted);
+    static void removeSlot(Tier& tier, Slot& slot) noexcept;
     // The retained-slot bound of each tier (APS5_BUFFER_POOL_SLOTS, default `defaultSlots`), read once.
     static std::size_t MaxSlots();
     std::size_t maxSlots;
@@ -138,7 +142,6 @@ private:
     Tier smallTier;
     Tier largeTier;
     Tier deviceTier;
-    std::uint64_t clock = 0;
     std::mutex slabMutex;
     std::unordered_map<std::uint64_t, Slab> slabs;
     std::unordered_map<VkDeviceMemory, std::unique_ptr<SlabBlock>> slabBlocks;

@@ -217,7 +217,6 @@ std::optional<BufferAllocation> BufferPool::Take(std::size_t bytes, VkBufferUsag
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
     const auto capacity = Capacity(bytes, properties);
     std::lock_guard lock(mutex);
-    ++clock;
     if (profile) {
         static auto lastReport = std::chrono::steady_clock::now();
         const auto now = std::chrono::steady_clock::now();
@@ -235,6 +234,7 @@ std::optional<BufferAllocation> BufferPool::Take(std::size_t bytes, VkBufferUsag
         return std::nullopt;
     }
     auto result = found->second.back().allocation;
+    removeSlot(tier, found->second.back());
     found->second.pop_back();
     if (found->second.empty()) tier.free.erase(found);
     --tier.slots;
@@ -244,14 +244,23 @@ std::optional<BufferAllocation> BufferPool::Take(std::size_t bytes, VkBufferUsag
 }
 
 void BufferPool::evictOldest(Tier& tier, std::vector<BufferAllocation>& evicted) {
-    const auto oldest = std::min_element(tier.free.begin(), tier.free.end(), [](const auto& left, const auto& right) { return left.second.front().lastUse < right.second.front().lastUse; });
+    const auto& allocation = tier.oldest->allocation;
+    const auto oldest = tier.free.find({allocation.bytes, allocation.usage, allocation.properties});
     // First: a throw here leaves the slot retained and counted.
     evicted.push_back(oldest->second.front().allocation);
     tier.retainedBytes -= oldest->second.front().allocation.allocationBytes;
+    removeSlot(tier, oldest->second.front());
     oldest->second.pop_front();
     if (oldest->second.empty()) tier.free.erase(oldest);
     --tier.slots;
     ++tier.evictions;
+}
+
+void BufferPool::removeSlot(Tier& tier, Slot& slot) noexcept {
+    if (slot.older != nullptr) slot.older->newer = slot.newer;
+    else tier.oldest = slot.newer;
+    if (slot.newer != nullptr) slot.newer->older = slot.older;
+    else tier.newest = slot.older;
 }
 
 std::size_t BufferPool::MaxSlots() {
@@ -273,6 +282,8 @@ VkDeviceSize BufferPool::trim() {
         std::lock_guard lock(mutex);
         for (const auto& [tier, retired] : {std::pair{&smallTier, &retiredSmall}, std::pair{&largeTier, &retiredLarge}, std::pair{&deviceTier, &retiredDevice}}) {
             tier->free.swap(retired->free);
+            tier->oldest = nullptr;
+            tier->newest = nullptr;
             tier->evictions += tier->slots;
             tier->retainedBytes = 0;
             tier->slots = 0;
@@ -313,7 +324,18 @@ void BufferPool::Put(const BufferAllocation& allocation) noexcept {
             evicted.push_back(allocation);
         } else {
             while (tier.slots != 0 && (tier.retainedBytes + allocation.allocationBytes > tier.budget || tier.slots >= maxSlots)) evictOldest(tier, evicted);
-            tier.free[{allocation.bytes, allocation.usage, allocation.properties}].push_back({allocation, ++clock});
+            const SlotKey key{allocation.bytes, allocation.usage, allocation.properties};
+            const auto [found, inserted] = tier.free.try_emplace(key);
+            try {
+                found->second.push_back({allocation, tier.newest});
+            } catch (...) {
+                if (inserted) tier.free.erase(found);
+                throw;
+            }
+            auto* slot = &found->second.back();
+            if (tier.newest != nullptr) tier.newest->newer = slot;
+            else tier.oldest = slot;
+            tier.newest = slot;
             ++tier.slots;
             tier.retainedBytes += allocation.allocationBytes;
         }
