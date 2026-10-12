@@ -619,6 +619,19 @@ target_link_libraries(agc_formatted_buffer_once_tests PRIVATE shader_recompiler_
 set_target_properties(agc_formatted_buffer_once_tests PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(agc_formatted_buffer_once_tests)
 
+add_test_executable(agc_early_fragment_kill_tests EXCLUDE_FROM_ALL tests/EarlyFragmentKill.cpp)
+target_link_libraries(agc_early_fragment_kill_tests PRIVATE shader_recompiler_agc_driver libc)
+set_target_properties(agc_early_fragment_kill_tests PROPERTIES CXX_EXTENSIONS OFF)
+configure_windows_unwind(agc_early_fragment_kill_tests)
+if(BUILD_TESTING)
+    set_target_properties(agc_early_fragment_kill_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
+    add_test(NAME agc_early_fragment_kill COMMAND agc_early_fragment_kill_tests)
+    if(WIN32)
+        set_tests_properties(agc_early_fragment_kill PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+endif()
+
 add_test_executable(agc_shader_disk_cache_tests EXCLUDE_FROM_ALL tests/ShaderDiskCache.cpp)
 target_include_directories(agc_shader_disk_cache_tests PRIVATE ${LIBS_INCLUDE_DIR})
 target_link_libraries(agc_shader_disk_cache_tests PRIVATE shader_recompiler_agc_driver libc)
