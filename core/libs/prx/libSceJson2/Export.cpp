@@ -808,19 +808,33 @@ int APS5_VABI _ZN3sce4Json6Parser5parseERNS0_5ValueEPKcm(Value* out, const char*
 }
 
 
-int APS5_VABI _ZN3sce4Json17InitParameterRttiC1EPNS0_14AllocParamRttiEPvm(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
+struct InitParameterRtti {
+    void* allocParam;
+    void* userData;
+    std::size_t fileBufferSize;
+};
+
+void APS5_VABI _ZN3sce4Json17InitParameterRttiC1EPNS0_14AllocParamRttiEPvm(InitParameterRtti* self, void* allocParam, void* userData, std::size_t fileBufferSize) {
+    self->allocParam = allocParam;
+    self->userData = userData;
+    self->fileBufferSize = fileBufferSize;
 }
+
 struct InitParameter2 {
     void* allocator;
     void* userData;
     std::size_t fileBufferSize;
+    std::int32_t specialFloatFormatType;
+    std::uint32_t reserved[3];
 };
-static_assert(sizeof(InitParameter2) <= 40);
+static_assert(sizeof(InitParameter2) == 0x28 && offsetof(InitParameter2, specialFloatFormatType) == 0x18);
 
 void APS5_VABI _ZN3sce4Json14InitParameter2C1Ev(InitParameter2* self) {
     *self = {};
+}
+
+void APS5_VABI _ZN3sce4Json14InitParameter2C2Ev(InitParameter2* self) {
+    _ZN3sce4Json14InitParameter2C1Ev(self);
 }
 
 void APS5_VABI _ZN3sce4Json14InitParameter212setAllocatorEPNS0_12MemAllocatorEPv(InitParameter2* self, void* allocator, void* userData) {
@@ -828,8 +842,17 @@ void APS5_VABI _ZN3sce4Json14InitParameter212setAllocatorEPNS0_12MemAllocatorEPv
     self->userData = userData;
 }
 
+void APS5_VABI _ZN3sce4Json18InitParameterRtti216setAllocatorRttiEPNS0_14AllocParamRttiEPv(InitParameter2* self, void* allocParam, void* userData) {
+    self->allocator = allocParam;
+    self->userData = userData;
+}
+
 void APS5_VABI _ZN3sce4Json14InitParameter217setFileBufferSizeEm(InitParameter2* self, std::size_t size) {
     self->fileBufferSize = size;
+}
+
+void APS5_VABI _ZN3sce4Json14InitParameter225setSpecialFloatFormatTypeENS0_22SpecialFloatFormatTypeE(InitParameter2* self, std::int32_t type) {
+    self->specialFloatFormatType = type;
 }
 
 int APS5_VABI _ZN3sce4Json11Initializer10initializeEPKNS0_14InitParameter2E(void* self, const InitParameter2* parameter) {
@@ -844,15 +867,6 @@ void APS5_VABI _ZN3sce4Json5Value5clearEv(Value* self) {
 }
 
 int APS5_VABI _ZN3sce4Json12MemAllocator11notifyErrorEimPv(void) {
-    NotImplemented_nid_no_patch(__func__);
-    return 0;
-}
-
-void APS5_VABI _ZN3sce4Json14InitParameter2C2Ev(InitParameter2* self) {
-    _ZN3sce4Json14InitParameter2C1Ev(self);
-}
-
-int APS5_VABI _ZN3sce4Json18InitParameterRtti216setAllocatorRttiEPNS0_14AllocParamRttiEPv(void) {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
@@ -882,4 +896,33 @@ int APS5_VABI _ZNK3sce4Json5ValuecvbEv(void) {
     return 0;
 }
 
+int APS5_VABI _ZN3sce4Json6Object4PairC1ERKNS0_6StringERKNS0_5ValueE() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI _ZN3sce4Json6Object4PairD1Ev() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI _ZN3sce4Json6Object6insertERKNS1_4PairE() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI _ZN3sce4Json5Array8iteratorppEi() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI _ZN3sce4Json5Array8iteratoraSERKS2_() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+int APS5_VABI _ZN3sce4Json5Array8iteratorC1Ev() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
 }

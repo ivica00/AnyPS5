@@ -286,7 +286,7 @@ Texture::Texture(const Context& context, TextureDetiler& detiler, const GuestTex
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocation.allocationSize = requirements.size;
         allocationBytes = requirements.size;
-        allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "texture");
         Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &owned->memory), "vkAllocateMemory texture");
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, owned->memory, 0), "vkBindImageMemory");
 
@@ -808,7 +808,6 @@ bool StorageFormatAvailable(const Context& context, std::uint32_t guestFormat) {
     }
 }
 
-// Integer formats take integer clear values; the DCC clear codes are only mapped for the others.
 bool IntegerFormat(VkFormat format) {
     switch (format) {
         case VK_FORMAT_R8_UINT: case VK_FORMAT_R8_SINT: case VK_FORMAT_R8G8_UINT: case VK_FORMAT_R8G8_SINT:
@@ -823,9 +822,12 @@ bool IntegerFormat(VkFormat format) {
     }
 }
 
-// The clear value a DCC clear code stands for, for non-integer formats.
 bool ClearColorFor(VkFormat format, DccKeys keys, VkClearColorValue& clear) {
-    if (IntegerFormat(format)) return false;
+    if (IntegerFormat(format)) {
+        if (keys != DccKeys::Clear0000) return false;
+        clear.uint32[0] = clear.uint32[1] = clear.uint32[2] = clear.uint32[3] = 0u;
+        return true;
+    }
     switch (keys) {
         case DccKeys::Clear0000: clear.float32[0] = clear.float32[1] = clear.float32[2] = clear.float32[3] = 0.0f; return true;
         case DccKeys::Clear0001: clear.float32[0] = clear.float32[1] = clear.float32[2] = 0.0f; clear.float32[3] = 1.0f; return true;
@@ -940,7 +942,7 @@ StorageTexture::StorageTexture(const Context& context, TextureDetiler& detiler, 
         VkMemoryAllocateInfo allocation{VK_STRUCTURE_TYPE_MEMORY_ALLOCATE_INFO};
         allocation.allocationSize = requirements.size;
         memoryBytes = requirements.size;
-        allocation.memoryTypeIndex = context.MemoryType(requirements.memoryTypeBits, VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT);
+        allocation.memoryTypeIndex = context.DeviceMemoryType(requirements.memoryTypeBits, requirements.size, "storage texture");
         Check(context.Function<PFN_vkAllocateMemory>("vkAllocateMemory")(context.device, &allocation, nullptr, &memory), "vkAllocateMemory storage texture");
         Check(context.Function<PFN_vkBindImageMemory>("vkBindImageMemory")(context.device, image, memory, 0), "vkBindImageMemory storage");
     } catch (...) {
@@ -1909,7 +1911,7 @@ bool StorageTexture::compareUntracked(std::uint64_t address, std::size_t bytes, 
     const auto first = address / blockBytes;
     Require(changed.size() == (end - 1) / blockBytes - first + 1, "texture comparison block count differs");
     const auto* recorder = Recorder::Active();
-    const std::array<std::uint64_t, 4> stamp{GuestMemory::CollectEpoch(), GuestMemory::TrackerGeneration(), GuestMemory::ForgetSerial(), recorder != nullptr ? recorder->NewestWriteNote(address, bytes) : 0};
+    const std::array<std::uint64_t, 4> stamp{GuestMemory::CollectEpoch(), GuestMemory::NewestStamp(address, bytes), GuestMemory::ForgetSerial(), recorder != nullptr ? recorder->NewestWriteNote(address, bytes) : 0};
     const bool cacheable = memoize && stamp[0] != 0 && (stamp[2] & 1u) == 0 && address == descriptor.baseAddress && bytes == guestBytes;
     if (cacheable && comparedGuestBytes == stamp) {
         std::fill(changed.begin(), changed.end(), GuestMemory::BlockUnchanged);
@@ -2974,6 +2976,51 @@ bool StorageTexture::PublishShadowsOnly(std::uint64_t address, std::size_t bytes
     if (scope == PublishScope::None || !AnyShadowedOverlaps(address, bytes)) return false;
     std::lock_guard gpu(GuestMemory::GpuMutex());
     return PublishShadow(address, bytes, scope, PublishReasonFor(reason)) != 0;
+}
+
+namespace {
+
+struct StorageDumpSelector {
+    std::uint64_t address = 0;
+    std::uint32_t width = 0, height = 0, layers = 0, format = 0;
+    bool anyFormat = true;
+};
+
+const StorageDumpSelector& StorageDumpSelection() {
+    static const StorageDumpSelector selector = [] {
+        StorageDumpSelector parsed;
+        const char* text = std::getenv("APS5_DUMP_STORAGE");
+        if (text == nullptr) return parsed;
+        if (const int fields = std::sscanf(text, "%ux%ux%u:%u", &parsed.width, &parsed.height, &parsed.layers, &parsed.format); fields >= 3) {
+            parsed.anyFormat = fields < 4;
+            return parsed;
+        }
+        parsed.address = std::strtoull(text, nullptr, 16);
+        return parsed;
+    }();
+    return selector;
+}
+
+bool StorageDumpSelects(const GuestTextureResource& descriptor) {
+    const auto& selector = StorageDumpSelection();
+    if (selector.address != 0) return descriptor.baseAddress == selector.address;
+    return selector.width != 0 && descriptor.width == selector.width && descriptor.height == selector.height && descriptor.depthOrLastArray + 1 == selector.layers && (selector.anyFormat || descriptor.format == selector.format);
+}
+
+}
+
+void StorageTexture::FlushDumpSelected(const char* reason) {
+    const auto& selector = StorageDumpSelection();
+    if (selector.address == 0 && selector.width == 0) return;
+    std::vector<std::pair<std::uint64_t, std::size_t>> ranges;
+    {
+        auto& pending = Pending();
+        std::lock_guard lock(pending.mutex);
+        for (const auto* texture : pending.textures) {
+            if (StorageDumpSelects(texture->descriptor)) ranges.emplace_back(texture->descriptor.baseAddress, static_cast<std::size_t>(texture->guestBytes));
+        }
+    }
+    for (const auto& [address, bytes] : ranges) static_cast<void>(FlushPending(address, bytes, nullptr, reason));
 }
 
 void StorageTexture::FlushAllPending(const char* reason) {
@@ -4257,15 +4304,15 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
             detiler.Dispatch(commands, descriptor.tileMode, elementBytes, linear.Handle(), geometry.LinearLayerOffset(layer) + mip.linearOffset, tiled.Handle(), geometry.GuestLayerOffset(layer) + mip.tiledOffset, mip, true, layer, geometry.thick, {.pipeBankXor = descriptor.pipeBankXor});
         }
     }
-    // Debug aid: APS5_DUMP_STORAGE=<hex address> saves that storage image's first mip after each of
-    // its first 8 write-backs as storage_<address>_<n>.raw (u32 width, height, VkFormat, then rows).
-    static const std::uint64_t dumpAddress = [] { const char* text = std::getenv("APS5_DUMP_STORAGE"); return text ? std::strtoull(text, nullptr, 16) : 0ull; }();
+    const bool dumpSelected = StorageDumpSelects(descriptor);
     static int dumps = 0;
     std::unique_ptr<Buffer> dump;
-    if (dumpAddress != 0 && descriptor.baseAddress == dumpAddress && dumps < 8) {
-        dump = std::make_unique<Buffer>(context, static_cast<std::size_t>(mips[0].linearSize), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+    if (dumpSelected && dumps < 8) {
+        dump = std::make_unique<Buffer>(context, static_cast<std::size_t>(mips[0].linearSize * arrayLayers), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
         RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
-        CopyBuffer(context, commands, linear.Handle(), mips[0].linearOffset, dump->Handle(), 0, mips[0].linearSize);
+        for (std::uint32_t layer = 0; layer < arrayLayers; ++layer) {
+            if (geometry.HasLayer(0, layer)) CopyBuffer(context, commands, linear.Handle(), geometry.LinearLayerOffset(layer) + mips[0].linearOffset, dump->Handle(), layer * mips[0].linearSize, mips[0].linearSize);
+        }
     }
     const auto toCopy = WholeBufferBarrier(tiled.Handle(), VK_ACCESS_SHADER_WRITE_BIT, VK_ACCESS_TRANSFER_READ_BIT);
     VkImageMemoryBarrier backToGeneral = toSource;

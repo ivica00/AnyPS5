@@ -62,6 +62,9 @@ static bool dir_name_match(const char* str, const char* pattern) {
         str++;
         pattern++;
     }
+    while (*pattern == '%') {
+        pattern++;
+    }
     return *str == '\0' && *pattern == '\0';
 }
 
@@ -314,6 +317,9 @@ static int dirNameSearch(const SaveDataDirNameSearchCond* cond, SaveDataDirNameS
         std::snprintf(result->dir_names[i].data, sizeof(result->dir_names[i].data), "%s", matches[i].name.c_str());
         if (result->params != nullptr) {
             result->params[i] = sortByParam ? matches[i].param : load_param(matches[i].path);
+        }
+        if (result->infos != nullptr) {
+            result->infos[i] = SaveDataSearchInfo{SAVE_DATA_BLOCKS_MAX, SAVE_DATA_BLOCKS_MAX, {}};
         }
     }
     result->hit_num = static_cast<std::uint32_t>(matches.size());
@@ -803,4 +809,16 @@ int APS5_VABI sceSaveDataCancel() {
     NotImplemented_nid_no_patch(__func__);
     return 0;
 }
+
+int APS5_VABI sceSaveDataDirNameSearch2() {
+    NotImplemented_nid_no_patch(__func__);
+    return 0;
+}
+
+APS5_EXPORT("RvID8BVeg+g", sceSaveDataUnknown_RvID8BVeg);
+int APS5_VABI sceSaveDataUnknown_RvID8BVeg() {
+    NotImplemented_nid_no_patch("RvID8BVeg+g");
+    return 0;
+}
+
 }
