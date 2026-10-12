@@ -53,7 +53,15 @@ int main() {
     Require(cxa_atexit_nid_postfix(First, nullptr, first) == 0);
     Require(cxa_atexit_nid_postfix(Second, nullptr, first) == 0);
     Require(cxa_atexit_nid_postfix(Other, nullptr, second) == 0);
-    cxa_finalize_nid_postfix(first);
+    const auto finalizeAlias = reinterpret_cast<void (APS5_VABI *)(void*)>(
+#ifdef _WIN32
+        GetProcAddress(GetModuleHandleW(L"libc.prx"), "H2e8t5ScQGc_nid_no_patch_cut")
+#else
+        dlsym(RTLD_DEFAULT, "H2e8t5ScQGc_nid_no_patch_cut")
+#endif
+    );
+    Require(finalizeAlias != nullptr);
+    finalizeAlias(first);
     Require(secondAt == 0 && firstAt == 1 && otherAt == -1);
     cxa_finalize_nid_postfix(reinterpret_cast<void*>(3));
     Require(otherAt == -1);

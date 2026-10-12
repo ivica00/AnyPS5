@@ -91,6 +91,8 @@ void APS5_VABI cxa_finalize_nid_postfix(void* dsoHandle) {
     CxaFinalize_nid_no_patch(dsoHandle);
 }
 
+APS5_EXPORT("H2e8t5ScQGc", cxa_finalize_nid_postfix);
+
 unsigned int APS5_VABI _Atomic_fetch_add_4_nid_postfix(volatile unsigned int* target, unsigned int value, int memoryOrder) {
     (void)memoryOrder;
     return GccAtomicFetchAdd(target, value);
