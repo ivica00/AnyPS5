@@ -60,7 +60,6 @@ float APS5_VABI tanf_nid_postfix(float x) { return std::tan(x); }
 float APS5_VABI log10f_nid_postfix(float x) { return std::log10(x); }
 float APS5_VABI logbf_nid_postfix(float x) { return std::logb(x); }
 double APS5_VABI exp2_nid_postfix(double x) { return std::exp2(x); }
-
 double APS5_VABI ldexp_nid_postfix(double x, int exponent) { return std::ldexp(x, exponent); }
 double APS5_VABI scalbn_nid_postfix(double x, int exponent) { return std::scalbn(x, exponent); }
 float APS5_VABI scalbnf_nid_postfix(float x, int exponent) { return std::scalbn(x, exponent); }
@@ -192,7 +191,6 @@ long double APS5_VABI log10l_nid_postfix(long double x) { return std::log10(x); 
 long double APS5_VABI powl_nid_postfix(long double base, long double exp) { return std::pow(base, exp); }
 long double APS5_VABI ldexpl_nid_postfix(long double x, int exp) { return std::ldexp(x, exp); }
 long double APS5_VABI truncl_nid_postfix(long double x) { return std::trunc(x); }
-double APS5_VABI logb_nid_postfix(double x) { return std::logb(x); }
 double APS5_VABI remainder_nid_postfix(double x, double y) { return std::remainder(x, y); }
 float APS5_VABI _FSinh_nid_postfix(float x, float y) { return y * std::sinh(x); }
 float APS5_VABI _FCosh_nid_postfix(float x, float y) { return y * std::cosh(x); }

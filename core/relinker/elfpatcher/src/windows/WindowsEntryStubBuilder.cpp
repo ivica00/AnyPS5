@@ -399,7 +399,6 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
             code.Emit({0x83, 0xf8, 0x7e});
             unusedMissing = code.Branch({0x0f, 0x84});
         }
-        }
         if (dependencyDiagnostics) writeString(loadFailed, true);
         writeString(failedModule, true);
         writeString(resolvedPaths[index], true);

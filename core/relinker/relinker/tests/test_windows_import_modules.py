@@ -305,7 +305,7 @@ def main():
 
         check_internal_guest_libc(convert, work, relinker)
 
-        result, native_source = convert('unscoped-native-provider', 'a.prx')
+        result, native_source = convert('legacy-native-provider', 'a.prx')
         assert result.returncode == 0, result.stderr
         native_image = (native_source.parent / 'app0' / 'prx' / 'a.prx.guest.prx').read_bytes()
         for name, symbol, module_name in [('legacy-host', 'shared', None),
