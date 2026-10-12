@@ -172,7 +172,7 @@ public:
         }
     }
 
-    void* MapAlias(std::uintptr_t address, std::size_t bytes) {
+    void* MapAlias(std::uintptr_t address, std::size_t bytes, bool required = true) {
         std::lock_guard lock(mutex);
         const auto refuse = [&](const char* reason) {
             char text[192];
@@ -181,14 +181,23 @@ public:
         };
         if (address % pageBytes != 0 || bytes % pageBytes != 0 || bytes == 0) throw refuse("the range is not made of whole shared pages");
         auto view = views.find(address);
-        if (view == views.end()) throw refuse("the range does not start at a shared view");
+        if (view == views.end()) {
+            if (!required) return nullptr;
+            throw refuse("the range does not start at a shared view");
+        }
         const auto section = view->second.section;
         const auto offset = view->second.offset;
         SYSTEM_INFO system{};
         GetSystemInfo(&system);
         for (std::size_t done = 0; done < bytes; done += pageBytes, ++view) {
-            if (view == views.end() || view->first != address + done || view->second.offset != offset + done) throw refuse("the range is not one contiguous run of views of a section");
-            if (view->second.section != section && !sameSection(view->second.section->handle, section->handle)) throw refuse("the range spans several sections");
+            if (view == views.end() || view->first != address + done || view->second.offset != offset + done) {
+                if (!required) return nullptr;
+                throw refuse("the range is not one contiguous run of views of a section");
+            }
+            if (view->second.section != section && !sameSection(view->second.section->handle, section->handle)) {
+                if (!required) return nullptr;
+                throw refuse("the range spans several sections");
+            }
         }
         const auto lead = offset % system.dwAllocationGranularity;
         void* alias = map(section->handle, GetCurrentProcess(), nullptr, offset - lead, lead + bytes, 0, PAGE_READWRITE, nullptr, 0);

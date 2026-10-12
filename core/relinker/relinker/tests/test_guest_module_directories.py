@@ -1,5 +1,6 @@
 from pathlib import Path
 import os
+import ctypes
 import struct
 import subprocess
 import sys
@@ -63,6 +64,40 @@ def main():
             return result, output
 
         for windows in (False, True):
+            case = work / f"{windows}-dynamic"
+            modules = case / "Engine" / "Plugins"
+            modules.mkdir(parents=True)
+            plugin = module_with_symbol(True)
+            plugin[0x400:0x406] = bytes.fromhex("b8 2a 00 00 00 c3")
+            (modules / "provider.prx").write_bytes(plugin)
+            (modules / "ignored.txt").write_text("not ELF")
+            options = ["--guest-module-directory", "Engine/Plugins",
+                       "--guest-module-directory", "Engine/./Plugins"]
+            result, output = convert(case, windows, options)
+            assert result.returncode == 0, (result.stdout, result.stderr)
+            artifact = case / "app0" / "Engine" / "Plugins" / "provider.prx.guest.prx"
+            assert list((case / "app0").rglob("*.guest.prx")) == [artifact]
+            if windows:
+                image = artifact.read_bytes()
+                header, = struct.unpack_from("<I", image, 0x3c)
+                characteristics, = struct.unpack_from("<H", image, header + 22)
+                assert characteristics & 0x2000, "Plugin is not a DLL"
+                if os.name == "nt":
+                    library = ctypes.WinDLL(str(artifact))
+                    assert library.shared() == 42
+                    ctypes.windll.kernel32.FreeLibrary(ctypes.c_void_p(library._handle))
+            else:
+                assert needed_libraries(output.read_bytes()) == []
+            result, _ = convert(case, windows, ["--guest-module-directory", "missing"])
+            assert result.returncode == 2 and "not a directory" in result.stderr, result.stderr
+            result, _ = convert(case, windows, [*options, "--exclude-sce-module", "provider.prx"])
+            assert result.returncode == 0, result.stderr
+            for invalid in ("..", "../Plugins", str(case.resolve())):
+                result, _ = convert(case, windows, ["--guest-module-directory", invalid])
+                assert result.returncode == 1 and "inside the module parent" in result.stderr, result.stderr
+            result, _ = convert(case, windows, [*options, "--skip-sce-module"])
+            assert result.returncode == 1 and "conflicts" in result.stderr, result.stderr
+
             for standard in (None, "sce_module", "sce_modules"):
                 case = work / f"{windows}-{standard}"
                 prx = case / "prx"

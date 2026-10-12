@@ -682,12 +682,14 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
             std::snprintf(text, sizeof(text), "AGC graphics: host import of 0x%llx+0x%llx: memory at 0x%llx (type 0x%lx, protection 0x%lx) is neither read-write, read-only nor a shared mapping", static_cast<unsigned long long>(base), static_cast<unsigned long long>(bytes), reinterpret_cast<unsigned long long>(refused.BaseAddress), refused.Type, refused.Protect);
             throw std::runtime_error(text);
         }
-        try {
-            entry.alias = GuestArena::GuestArenaMapAlias_nid_postfix(static_cast<std::uintptr_t>(base), static_cast<std::size_t>(bytes));
-        } catch (const std::runtime_error&) {
-            if (entry.ranges.size() == 1) throw;
-            state.unaliasedSpans.insert(base);
-            return importAllocation(context, state, address, lease);
+        entry.alias = GuestArena::GuestArenaTryMapAlias_nid_postfix(static_cast<std::uintptr_t>(base), static_cast<std::size_t>(bytes));
+        if (entry.alias == nullptr) {
+            if (entry.ranges.size() > 1) {
+                state.unaliasedSpans.insert(base);
+                return importAllocation(context, state, address, lease);
+            }
+            state.failed.insert(base);
+            return nullptr;
         }
     }
 #else

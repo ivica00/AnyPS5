@@ -12,6 +12,7 @@
 #include "prx/libScePad/include/PadState.hpp"
 #include "prx/libScePad/include/PadInputTypes.hpp"
 #include "prx/libc/include/General.hpp"
+#include <atomic>
 
 PadInput::PadInput()
     : bindings(Pad::LoadInputMapping()), pressed(bindings.size()), wheelReleaseTimes(bindings.size()) {
@@ -124,7 +125,13 @@ PadInputState PadInput::sampleController() const {
         return SDL_GameControllerGetButton(controller, button) != 0;
     };
     const auto addButton = [&result, &readButton](SDL_GameControllerButton source, Pad::PadButton button) {
-        if (readButton(source)) result.buttons |= static_cast<std::uint32_t>(button);
+        if (readButton(source)) {
+            result.buttons |= static_cast<std::uint32_t>(button);
+            static std::atomic<int> loggedBtn{0};
+            if (loggedBtn.fetch_add(1) < 20) {
+                APS5_LOG_OUT("PadInput: controller button %d pressed (0x%x)", (int)source, static_cast<std::uint32_t>(button));
+            }
+        }
     };
     addButton(SDL_CONTROLLER_BUTTON_A, Pad::PadButton::Cross);
     addButton(SDL_CONTROLLER_BUTTON_B, Pad::PadButton::Circle);
@@ -309,7 +316,7 @@ void PadInput::publish() {
     state.accel = controllerState.accel;
     state.gyro = controllerState.gyro;
     state.touch = controllerState.touch;
-    state.deviceKind = controllerState.deviceKind;
+    state.deviceKind = controllerState.deviceKind != 0 ? controllerState.deviceKind : 1;
 
     std::array<bool, 4> negative{};
     std::array<bool, 4> positive{};

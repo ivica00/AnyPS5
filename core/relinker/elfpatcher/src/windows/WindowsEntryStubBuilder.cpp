@@ -130,7 +130,6 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
     std::vector<std::uint32_t> searchCounts;
     std::vector<bool> platformTlsResolvers;
     std::vector<bool> imported(libraries.size());
-    const bool unscopedImports = std::any_of(imports.begin(), imports.end(), [](const auto& import) { return import.Library.empty(); });
     for (const auto& import : imports) {
         std::vector<std::uint32_t> order;
         for (std::size_t index = 0; index < libraries.size(); ++index) {
@@ -181,6 +180,8 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
     for (std::size_t index = guestModules.size(); index < libraries.size(); ++index) {
         if (unmatched.contains(stem(libraries[index]))) imported[index] = true;
     }
+    const bool unscopedImports = std::any_of(imports.begin(), imports.end(), [](const auto& import) { return import.Library.empty(); });
+    const auto shouldLoad = [&](const std::size_t index) { return index < guestModules.size() || imported[index] || unscopedImports; };
 
     const auto lastError = reserve(4);
     const auto errorDigits = reserve(11);
@@ -360,7 +361,7 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
     }
 
     for (std::size_t index = 0; index < libraries.size(); ++index) {
-        if (index >= guestModules.size() && !imported[index] && !unscopedImports) continue;
+        if (!shouldLoad(index)) continue;
         if (absolutePath && index >= guestModules.size()) {
             code.Rip({0x48, 0x8d, 0x0d}, libraryPaths[index]);
         } else {
@@ -398,9 +399,8 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
             code.Emit({0x83, 0xf8, 0x7e});
             unusedMissing = code.Branch({0x0f, 0x84});
         }
-        if (dependencyDiagnostics) {
-            writeString(loadFailed, true);
         }
+        if (dependencyDiagnostics) writeString(loadFailed, true);
         writeString(failedModule, true);
         writeString(resolvedPaths[index], true);
         writeString(newline, true);
@@ -539,7 +539,7 @@ WindowsEntryStub WindowsEntryStubBuilder::Build(const std::uint32_t dataRva, con
             code.PatchBranch(branch, code.GetRva());
         writeString(searched, true);
         for (std::size_t index = 0; index < resolvedPaths.size(); ++index) {
-            if (index >= guestModules.size() && !imported[index] && !unscopedImports) continue;
+            if (!shouldLoad(index)) continue;
             writeString(indent, true);
             writeString(resolvedPaths[index], true);
             writeString(newline, true);
