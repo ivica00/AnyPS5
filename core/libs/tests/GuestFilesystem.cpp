@@ -473,8 +473,8 @@ int main() {
         Require(checkUnsupportedLink(fileLink));
         Require(checkUnsupportedLink(directoryLink));
         Require(checkUnsupportedLink(danglingLink));
-        Require(std::filesystem::remove(fileLink) && std::filesystem::remove(directoryLink) &&
-            std::filesystem::remove(danglingLink) && std::filesystem::remove(targetDirectory));
+        Require(DeleteFileW(fileLink.c_str()) != 0 && RemoveDirectoryW(directoryLink.c_str()) != 0 &&
+            DeleteFileW(danglingLink.c_str()) != 0 && RemoveDirectoryW(targetDirectory.c_str()) != 0);
     }
 #endif
     FileStat identity{};

@@ -728,11 +728,17 @@ int APS5_VABI stat_nid_postfix(const char* path, FileStat* sb) {
 
 int APS5_VABI lstat_nid_postfix(const char* path, FileStat* sb) {
     if (sb == nullptr) return PosixFailure(GUEST_EFAULT);
-    if (const int error = PathError(path)) return PosixFailure(error);
-    std::filesystem::path native;
-    if (const int error = ResolvePathError_nid_no_patch(path, native)) return PosixFailure(error);
-    if (!File::FillLinkStat(native, sb)) return PosixResult(SceErrorFromErrno(errno));
-    return 0;
+    const int previousError = *__error_nid_postfix();
+    try {
+        if (const int error = PathError(path)) return PosixFailure(error);
+        std::filesystem::path native;
+        if (const int error = ResolvePathError_nid_no_patch(path, native)) return PosixFailure(error);
+        if (!File::FillLinkStat(native, sb)) return PosixResult(SceErrorFromErrno(errno));
+        return 0;
+    } catch (...) {
+        *__error_nid_postfix() = previousError;
+        throw;
+    }
 }
 
 int APS5_VABI unlink_nid_postfix(const char* path) {
