@@ -173,6 +173,8 @@ IrProgram PrepareResourceProgram(const RecompileRequest& request, ShaderPreparat
     translateOptions.scratchDwords = request.context.compute.has_value() ? request.context.compute->scratchDwords : 0u;
     translateOptions.sharedMemoryBytes = DeviceMemoryLdsBytes(request);
     translateOptions.fragmentShaderBarycentricEnabled = request.target.fragmentShaderBarycentricEnabled;
+    const auto supports = [&](spv::Capability capability) { return std::ranges::find(request.target.supportedCapabilities, static_cast<std::uint32_t>(capability)) != request.target.supportedCapabilities.end(); };
+    translateOptions.nativeFloat16 = supports(spv::CapabilityFloat16) && supports(spv::CapabilityRoundingModeRTE) && supports(spv::CapabilityDenormPreserve);
     translateOptions.floatMode = request.context.floatMode;
     translateOptions.inputInfo = inputInfo;
 
@@ -290,6 +292,14 @@ struct SourceEntry {
 
 namespace {
 
+class PrimedSharedMutex : public std::shared_mutex {
+public:
+    PrimedSharedMutex() {
+        lock();
+        unlock();
+    }
+};
+
 struct ResourceProgram {
     explicit ResourceProgram(const RecompileRequest& request, ShaderPreparationContext* preparation = nullptr) : program(std::make_unique<IrProgram>(PrepareResourceProgram(request, preparation))), plan(std::make_shared<const IrResourcePlan>(ResourceMaterializer{}.ExtractPlan(*program))) {}
 
@@ -318,7 +328,7 @@ bool FailureMemo() {
 }
 
 std::shared_ptr<SourceEntry> getSource(const RecompileRequest& request, ShaderPreparationContext* preparation = nullptr) {
-    static std::shared_mutex mutex;
+    static PrimedSharedMutex mutex;
     // Entries whose code hashes alike share a bucket; the code comparison picks the right one.
     static std::unordered_map<std::vector<std::uint64_t>, std::vector<std::shared_ptr<SourceEntry>>, SourceKeyHash> sources;
     struct SourceKeyStorage {};
@@ -587,7 +597,7 @@ struct PreparedBindingPlan {
     std::once_flag ready;
     std::exception_ptr failure;
     DescriptorBindingPlan bindings;
-    std::shared_mutex mutex;
+    PrimedSharedMutex mutex;
     std::map<std::vector<std::uint32_t>, std::shared_ptr<PreparedModuleEntry>> modules;
 };
 
@@ -618,7 +628,7 @@ std::shared_ptr<PreparedBindingPlan> preparedBindingPlan(const CompiledVariant& 
     }
     key.push_back(exports.size());
     for (const auto mapping : exports) key.push_back(mapping);
-    static std::shared_mutex mutex;
+    static PrimedSharedMutex mutex;
     static std::map<std::vector<std::uint64_t>, std::shared_ptr<PreparedBindingPlan>> plans;
     std::shared_ptr<PreparedBindingPlan> plan;
     {
@@ -647,7 +657,7 @@ std::shared_ptr<const SpecializedModule> specializeModule(const CompiledShaderAr
     key.clear();
     key.push_back(artifact.variantId);
     for (const auto& constant : constants) key.push_back((static_cast<std::uint64_t>(constant.id) << 32u) | constant.value);
-    static std::shared_mutex mutex;
+    static PrimedSharedMutex mutex;
     static std::map<std::vector<std::uint64_t>, std::shared_ptr<SpecializedModuleEntry>> modules;
     std::shared_ptr<SpecializedModuleEntry> entry;
     {
