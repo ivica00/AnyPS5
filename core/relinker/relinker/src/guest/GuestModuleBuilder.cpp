@@ -341,7 +341,7 @@ std::vector<GuestArtifact> GuestModuleBuilder::Build(const std::filesystem::path
         const auto nameOffset = Io::ReadU32(dynamic.DynSymData, offset);
         const std::string name(reinterpret_cast<const char*>(dynamic.DynStrData.data() + nameOffset));
         const auto found = exports.find(name.substr(0, name.find('#')));
-        if (found != exports.end()) for (const auto provider : found->second) deferred[provider] = false;
+        if (found != exports.end()) for (const auto& provider : found->second) deferred[provider.Provider] = false;
     }
     for (auto position = order.rbegin(); position != order.rend(); ++position) {
         if (!deferred[*position]) for (const auto dependency : dependencies[*position]) deferred[dependency] = false;

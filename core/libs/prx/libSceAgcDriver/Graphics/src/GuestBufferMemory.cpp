@@ -721,7 +721,7 @@ const HostImport* importAllocation(const Context& context, HostImports& state, s
                 state.unaliasedSpans.insert(base);
                 return importAllocation(context, state, address, lease);
             }
-            state.failed.insert(base);
+            state.failed.insert_or_assign(base, ImportFailure{base, bytes, GuestAllocations::Mapped(entry.ranges.begin(), entry.ranges.end())});
             return nullptr;
         }
     }
