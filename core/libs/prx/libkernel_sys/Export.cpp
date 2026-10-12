@@ -8,6 +8,7 @@
 #include <limits>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <system_error>
 #ifdef __linux__
 #include <cerrno>
@@ -47,6 +48,33 @@ constexpr int GuestEnametoolong = 63;
 constexpr int GuestEnotempty = 66;
 constexpr int GuestEoverflow = 84;
 constexpr int GuestAtFdcwd = -100;
+constexpr std::size_t GuestPathMax = 1024;
+constexpr std::size_t GuestNameMax = 255;
+
+constexpr int PcLinkMax = 1;
+constexpr int PcMaxCanon = 2;
+constexpr int PcMaxInput = 3;
+constexpr int PcNameMax = 4;
+constexpr int PcPathMax = 5;
+constexpr int PcPipeBuf = 6;
+constexpr int PcChownRestricted = 7;
+constexpr int PcNoTrunc = 8;
+constexpr int PcVdisable = 9;
+constexpr int PcAllocSizeMin = 10;
+constexpr int PcFileSizeBits = 12;
+constexpr int PcRecIncrXferSize = 14;
+constexpr int PcRecMaxXferSize = 15;
+constexpr int PcRecMinXferSize = 16;
+constexpr int PcRecXferAlign = 17;
+constexpr int PcSymlinkMax = 18;
+constexpr int PcMinHoleSize = 21;
+constexpr int PcAsyncIo = 53;
+constexpr int PcPrioIo = 54;
+constexpr int PcSyncIo = 55;
+constexpr int PcAclExtended = 59;
+constexpr int PcAclPathMax = 60;
+constexpr int PcMacPresent = 63;
+constexpr int PcAclNfs4 = 64;
 
 std::int64_t Fail(int error) {
     *__error_nid_postfix() = error;
@@ -108,6 +136,43 @@ bool ReadRelativeSymbolicLink(const std::filesystem::path& native, std::string& 
     return true;
 }
 #endif
+
+std::int64_t ReadNativeLink(const std::filesystem::path& native, char* buffer, std::size_t size) {
+#ifdef _WIN32
+    const DWORD attributes = GetFileAttributesW(native.wstring().c_str());
+    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
+        std::string target;
+        if (!ReadRelativeSymbolicLink(native, target)) {
+            NotImplemented_nid_no_patch("readlink of a Windows reparse point other than a relative symbolic link");
+            return -1;
+        }
+        return CopyLinkTarget(target, buffer, size);
+    }
+#endif
+    std::error_code error;
+    const auto status = std::filesystem::symlink_status(native, error);
+    if (error) return Fail(GuestError(error));
+    if (status.type() == std::filesystem::file_type::not_found) return Fail(GuestEnoent);
+    if (!std::filesystem::is_symlink(status)) return Fail(GuestEinval);
+    const auto target = std::filesystem::read_symlink(native, error).generic_string();
+    if (error) return Fail(GuestError(error));
+    return CopyLinkTarget(target, buffer, size);
+}
+
+bool HasLongComponent(std::string_view path) {
+    for (std::size_t start = 0; start < path.size();) {
+        const auto end = std::min(path.find('/', start), path.size());
+        if (end - start > GuestNameMax) {
+            if (start == 0) return true;
+            std::filesystem::path prefix;
+            if (ResolvePathError_nid_no_patch(std::string(path.substr(0, start)).c_str(), prefix)) return false;
+            std::error_code error;
+            return std::filesystem::is_directory(prefix, error);
+        }
+        start = end + 1;
+    }
+    return false;
+}
 }
 
 extern "C" {
@@ -137,25 +202,59 @@ std::int64_t APS5_VABI readlink_nid_postfix(const char* path, char* buffer, std:
     if (size > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) return Fail(GuestEinval);
     std::filesystem::path native;
     if (const int error = ResolvePathError_nid_no_patch(path, native)) return Fail(error);
-#ifdef _WIN32
-    const DWORD attributes = GetFileAttributesW(native.wstring().c_str());
-    if (attributes != INVALID_FILE_ATTRIBUTES && (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0) {
-        std::string target;
-        if (!ReadRelativeSymbolicLink(native, target)) {
-            NotImplemented_nid_no_patch("readlink of a Windows reparse point other than a relative symbolic link");
-            return -1;
-        }
-        return CopyLinkTarget(target, buffer, size);
-    }
-#endif
+    return ReadNativeLink(native, buffer, size);
+}
+
+std::int64_t APS5_VABI readlinkat_nid_postfix(int fd, const char* path, char* buffer, std::size_t size) {
+    if (path == nullptr) return Fail(GuestEfault);
+    if (*path == '\0') return Fail(GuestEnoent);
+    if (size > static_cast<std::size_t>(std::numeric_limits<std::int64_t>::max())) return Fail(GuestEinval);
+    if (fd == GuestAtFdcwd || *path == '/') return readlink_nid_postfix(path, buffer, size);
+    int error = 0;
+    const char* base = GetDirectoryDescriptorPath_nid_no_patch(fd, &error);
+    if (base == nullptr) return Fail(error);
+    return ReadNativeLink(std::filesystem::path(reinterpret_cast<const char8_t*>(base)) /
+                          std::filesystem::path(reinterpret_cast<const char8_t*>(path)), buffer, size);
+}
+
+std::int64_t APS5_VABI pathconf_nid_postfix(const char* path, int name) {
+    if (path == nullptr) return Fail(GuestEfault);
+    if (*path == '\0') return Fail(GuestEnoent);
+    if (std::strlen(path) >= GuestPathMax || HasLongComponent(path)) return Fail(GuestEnametoolong);
+    std::filesystem::path native;
+    if (const int error = ResolvePathError_nid_no_patch(path, native)) return Fail(error);
     std::error_code error;
-    const auto status = std::filesystem::symlink_status(native, error);
+    const auto status = std::filesystem::status(native, error);
     if (error) return Fail(GuestError(error));
-    if (status.type() == std::filesystem::file_type::not_found) return Fail(GuestEnoent);
-    if (!std::filesystem::is_symlink(status)) return Fail(GuestEinval);
-    const auto target = std::filesystem::read_symlink(native, error).generic_string();
-    if (error) return Fail(GuestError(error));
-    return CopyLinkTarget(target, buffer, size);
+    if (!std::filesystem::exists(status)) return Fail(GuestEnoent);
+    switch (name) {
+    case PcLinkMax: return 32767;
+    case PcNameMax: return static_cast<std::int64_t>(GuestNameMax);
+    case PcPathMax: return static_cast<std::int64_t>(GuestPathMax);
+    case PcPipeBuf: return 512;
+    case PcChownRestricted: return 1;
+    case PcNoTrunc: return 1;
+    case PcFileSizeBits: return 64;
+    case PcRecMaxXferSize: return -1;
+    case PcSymlinkMax: return static_cast<std::int64_t>(GuestPathMax);
+    case PcPrioIo: return 0;
+    case PcSyncIo: return 0;
+    case PcMaxCanon:
+    case PcMaxInput:
+    case PcVdisable:
+    case PcAllocSizeMin:
+    case PcRecIncrXferSize:
+    case PcRecMinXferSize:
+    case PcRecXferAlign:
+    case PcMinHoleSize:
+    case PcAsyncIo:
+    case PcAclExtended:
+    case PcAclPathMax:
+    case PcMacPresent:
+    case PcAclNfs4:
+        throw std::runtime_error("pathconf: name " + std::to_string(name) + " depends on the console filesystem or kernel configuration");
+    default: return Fail(GuestEinval);
+    }
 }
 
 int APS5_VABI link_nid_postfix(const char* existing, const char* created) {

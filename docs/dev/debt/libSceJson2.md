@@ -8,5 +8,5 @@
 
 ### Functional
 
-- PPSA30601 imports declared without parameters, signatures unknown, added without an implementation because the title fails to load without them: [six sce::Json::Object::Pair, sce::Json::Object and sce::Json::Array::iterator members](../../../core/libs/prx/libSceJson2/Export.cpp) (libSceJson2), [sceAmprAmmGetUsageStatsData](../../../core/libs/prx/libSceAmpr/Export.cpp) (libSceAmpr), [sceMouseResetAbsolutePosition](../../../core/libs/prx/libSceMouse/Export.cpp) (libSceMouse) and [sceSaveDataDirNameSearch2](../../../core/libs/prx/libSceSaveData.native/Export.cpp) (libSceSaveData.native)
+- PPSA30601 imports declared without parameters, signatures unknown, added without an implementation because the title fails to load without them: [six sce::Json::Object::Pair, sce::Json::Object and sce::Json::Array::iterator members](../../../core/libs/prx/libSceJson2/Export.cpp) (libSceJson2) and [sceMouseResetAbsolutePosition](../../../core/libs/prx/libSceMouse/Export.cpp) (libSceMouse)
 - [sce::Json::InitParameter2 base-object constructor](../../../core/libs/prx/libSceJson2/Export.cpp) (libSceJson2) - forwards to the complete-object constructor and uses its inferred layout and default field values; constructor equivalence and initialization bytes remain unverified on the console

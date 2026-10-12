@@ -610,6 +610,89 @@ void verifyPureFlatSlots() {
     require(Detail::ComputePureFlatSlots(plan) == Pure{0, 0, 0, 0}, "pure flat slots: an incomplete plan was classified");
 }
 
+void verifyGuardedDescriptorSources() {
+    using namespace ShaderRecompiler;
+    constexpr std::uint32_t Format8888UNorm = 56;
+    constexpr std::uint32_t Type2D = 9;
+    struct alignas(256) Texture { std::array<std::uint8_t, 256> bytes{}; };
+    static Texture texture;
+    const auto base = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(texture.bytes.data()));
+    const std::array<std::uint32_t, 8> valid{static_cast<std::uint32_t>(base >> 8u), static_cast<std::uint32_t>((base >> 40u) & 0xffu) | (Format8888UNorm << 20u) | (3u << 30u), 3u << 14u, 0xfacu | (Type2D << 28u), 0u, 0u, 0u, 0u};
+    const std::array<std::uint32_t, 8> invalid{0x12345678u, 0xffffffffu, 0xffffffffu, 0u, 0u, 0u, 0u, 0u};
+    const std::array<std::uint32_t, 4> sampler{0u, 0u, 0u, 0u};
+    std::array<std::uint32_t, 4> output{};
+    const auto outputAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(output.data()));
+    const std::array<std::uint32_t, 4> outputV{static_cast<std::uint32_t>(outputAddress), static_cast<std::uint32_t>((outputAddress >> 32u) & 0xffffu), 16u, 0xfacu};
+    std::array<std::uint32_t, 32> srt{};
+    const auto fill = [&](const std::array<std::uint32_t, 8>& image, std::uint32_t mode) {
+        std::copy(image.begin(), image.end(), srt.begin());
+        std::copy(sampler.begin(), sampler.end(), srt.begin() + 8);
+        std::copy(outputV.begin(), outputV.end(), srt.begin() + 16);
+        srt[20] = mode;
+    };
+    const auto srtAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(srt.data()));
+    const std::array<std::uint32_t, 2> userData{static_cast<std::uint32_t>(srtAddress), static_cast<std::uint32_t>(srtAddress >> 32u)};
+    const std::array<std::uint32_t, 4> capabilities{29u, spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
+    RecompileRequest request{};
+    const std::vector<std::uint32_t> code{0xf4000400u, 0xfa000050u, 0xf4080500u, 0xfa000020u, 0xf4080600u, 0xfa000040u, 0xbf8cc07fu, 0xbf068010u, 0xbf850006u, 0xf40c0200u, 0xfa000000u, 0xbf8cc07fu, 0xf09c0f08u, 0x00a20000u, 0xbf8c3f70u, 0xe0700000u, 0x80060000u, 0xbf810000u};
+    request.shader = {ShaderStage::Compute, 0x22000u, code, 0, {}};
+    request.context.waveSize = 32;
+    request.context.userDataBaseRegister = 0;
+    request.context.userData = userData;
+    request.context.compute = ShaderComputeStageInfo{{32u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+    request.target.vulkanVersion = 0x00401000u;
+    request.target.spirvVersion = 0x00010300u;
+    request.target.subgroupSize = 32;
+    request.target.supportedCapabilities = capabilities;
+    request.target.supportedExtensions = extensions;
+    request.target.bdaAbiVersion = BdaAbi::Version;
+    request.target.fragmentShaderBarycentricEnabled = false;
+    request.layout.pushConstantSizeBytes = 128;
+
+    fill(invalid, 0u);
+    const auto plan = GetResourcePlan(request);
+    require(plan->info.images.size() == 1u && plan->info.samplers.size() == 1u, "guarded sources: the image and its sampler were not planned");
+    require(!plan->controlFlow.empty(), "guarded sources: the branch around the image was not planned");
+    {
+        AgcDriver::ShaderMemory memory({});
+        const auto capture = memory.Capture(request);
+        require(capture->snapshot.images.size() == 1u && std::ranges::all_of(capture->snapshot.images[0].dwords, [](std::uint32_t word) { return word == 0u; }), "guarded sources: the skipped T# was not left null");
+    }
+    fill(invalid, 1u);
+    {
+        AgcDriver::ShaderMemory memory({});
+        expectFailure([&] { static_cast<void>(memory.Capture(request)); }, "runtime image descriptor is invalid", "guarded sources: an invalid T# behind a taken branch was accepted");
+    }
+    fill(valid, 1u);
+    {
+        AgcDriver::ShaderMemory memory({});
+        const auto capture = memory.Capture(request);
+        require(capture->snapshot.images.size() == 1u && std::equal(valid.begin(), valid.end(), capture->snapshot.images[0].dwords.begin()), "guarded sources: the T# behind a taken branch was not read");
+    }
+    fill(valid, 0u);
+    {
+        AgcDriver::ShaderMemory memory({});
+        const auto capture = memory.Capture(request);
+        require(capture->snapshot.images.size() == 1u && std::ranges::all_of(capture->snapshot.images[0].dwords, [](std::uint32_t word) { return word == 0u; }), "guarded sources: a valid T# behind a skipped branch was read");
+    }
+
+    const std::vector<std::uint32_t> storeCode{0xf4000400u, 0xfa000050u, 0xbf8cc07fu, 0xbf068010u, 0xbf850006u, 0xf40c0100u, 0xfa000000u, 0xbf8cc07fu, 0xf0200f08u, 0x00010004u, 0xbf820005u, 0xf40c0100u, 0xfa000000u, 0xbf8cc07fu, 0xf0200f10u, 0x00010004u, 0xbf810000u};
+    auto storeRequest = request;
+    storeRequest.shader = {ShaderStage::Compute, 0x23000u, storeCode, 0, {}};
+    const auto compileStore = [&](std::uint32_t mode) {
+        fill(valid, mode);
+        AgcDriver::ShaderMemory memory({});
+        const auto capture = memory.Capture(storeRequest);
+        storeRequest.context.memory = memory.Regions();
+        return Recompile(storeRequest, *capture);
+    };
+    const auto storePlan = GetResourcePlan(storeRequest);
+    require(storePlan->info.images.size() == 2u && storePlan->descriptorSources.size() == 1u, "guarded images: the two stores were not planned as two images of one T#");
+    static_cast<void>(compileStore(1u));
+    expectFailure([&] { static_cast<void>(compileStore(0u)); }, "incompatible with the static runtime image interface", "guarded images: a store of the wrong dimension behind a taken branch was accepted");
+}
+
 // A compute program sampling a T# loaded from a table buffer at a runtime key (a bindless image
 // table): mode M enumerates the keys from the material records, mode T binds the whole table.
 void verifyBindlessTable() {
@@ -3097,6 +3180,7 @@ void verifyGuardedNullPointers() {
     const auto tableAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(table.data()));
     vertexRoot[2] = static_cast<std::uint32_t>(tableAddress);
     vertexRoot[3] = static_cast<std::uint32_t>(tableAddress >> 32u);
+    vertexRoot[0] = 1u;
     AgcDriver::ShaderMemory mappedVertexMemory({});
     const auto mappedVertex = mappedVertexMemory.Capture(vertex.request);
     require(mappedVertex->snapshot.srtPoison.empty() && mappedVertex->snapshot.buffers.size() == 1u && mappedVertex->snapshot.buffers[0].dwords[0] == table[4], "guarded pointer: a vertex V# behind a mapped pointer was poisoned or not read");
@@ -3188,6 +3272,7 @@ int main(int argc, char** argv) {
         verifyOutOfRangeConstantReads();
         verifySignedMinimum();
         verifyPureFlatSlots();
+        verifyGuardedDescriptorSources();
         verifyBindlessTable();
         verifyDescriptorPhis();
         verifyLaneSelectedDescriptors();

@@ -793,6 +793,7 @@ private:
 
     static void* Main(void* argument) {
         auto& pool = *static_cast<RegistrationPreparePool*>(argument);
+        if (PerformanceTrace::Configured()) PerformanceTrace::BindThread("shader prepare", TraceThread::DefaultCapacity / 8);
         for (;;) {
             std::function<void()> task;
             {

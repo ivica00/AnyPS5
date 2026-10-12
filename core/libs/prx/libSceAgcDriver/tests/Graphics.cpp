@@ -814,6 +814,30 @@ void ColorPipeBankXorTests() {
         const auto color = AgcDriver::Graphics::DecodeState(queue).color;
         Require(color.tileMode == AgcDriver::Graphics::ColorTileMode::D4KBX && color.address == block + 0x3000u && color.pipeBankXor == pipeBankXor, "a SW_4KB_D_X color base did not split into its 4 KiB block base and pipe/bank XOR " + std::to_string(pipeBankXor));
     }
+    queue.context[0x3b8] = 0x0dc68000u;
+    for (const std::uint32_t pipeBankXor : {0u, 0x4600u, 0xcf00u}) {
+        const auto address = block + pipeBankXor;
+        queue.context[0x318] = static_cast<std::uint32_t>(address >> 8u);
+        queue.context[0x390] = static_cast<std::uint32_t>(address >> 40u);
+        const auto color = AgcDriver::Graphics::DecodeState(queue).color;
+        Require(color.tileMode == AgcDriver::Graphics::ColorTileMode::D64KBX && color.address == block && color.surfaceAddress == block && color.pipeBankXor == pipeBankXor, "a SW_64KB_D_X color base did not split its block address and XOR");
+    }
+    for (const std::uint32_t columnBits : {0x1000u, 0x2000u, 0x3000u}) {
+        queue.context[0x318] = static_cast<std::uint32_t>((block + columnBits) >> 8u);
+        queue.context[0x390] = static_cast<std::uint32_t>((block + columnBits) >> 40u);
+        expectFailure([&queue] { AgcDriver::Graphics::DecodeColorBuffer(queue.context, 0); }, "unsupported display color pipe/bank XOR column bits");
+    }
+    static std::vector<std::byte> mipStorage(16u * blockBytes);
+    const auto mipBase = (reinterpret_cast<std::uintptr_t>(mipStorage.data()) + blockBytes - 1u) / blockBytes * blockBytes;
+    const auto mips = AgcDriver::Graphics::ComputeElementMipLayout(AgcDriver::Graphics::TextureTileMode::kD64KBX, 4, 256, 128, 5);
+    const auto sliceBytes = AgcDriver::Graphics::ComputeSurfaceSize(mips, 1);
+    queue.context[0x318] = static_cast<std::uint32_t>((mipBase + 0x0200u) >> 8u);
+    queue.context[0x390] = static_cast<std::uint32_t>((mipBase + 0x0200u) >> 40u);
+    queue.context[0x3b0] = (4u << 28u) | (255u << 14u) | 127u;
+    queue.context[0x3b8] |= 1u;
+    queue.context[0x31b] = (2u << 26u) | 1u | (1u << 13u);
+    const auto mipColor = AgcDriver::Graphics::DecodeColorBuffer(queue.context, 0);
+    Require(mipColor.mip == 2 && mipColor.mipCount == 5 && mipColor.extent.width == 64 && mipColor.extent.height == 32 && mipColor.surfaceAddress == mipBase + sliceBytes && mipColor.address == mipBase + sliceBytes + mips[2].tiledOffset && mipColor.mipTail == mips[2].tail && mipColor.pipeBankXor == 0x0200u, "a display XOR color view lost its array slice, mip placement or XOR");
 }
 
 void HiddenUserWordVertexTablesTests() {
@@ -2233,6 +2257,10 @@ struct MockVulkan {
     std::uint32_t boundFirst = 0;
     VkPipelineBindPoint boundPoint = VK_PIPELINE_BIND_POINT_MAX_ENUM;
     std::map<VkPipelineLayout, VkDeviceSize> pipelineLayoutPushConstantSize;
+    std::map<VkPipelineLayout, std::vector<VkDescriptorSetLayout>> pipelineLayoutSets;
+    std::map<VkPipelineLayout, VkPipelineLayoutCreateFlags> pipelineLayoutFlags;
+    std::map<VkPipelineLayout, std::vector<VkPushConstantRange>> pipelineLayoutPushRanges;
+    std::map<VkGraphicsPipelineLibraryFlagsEXT, VkPipelineLayout> libraryLayouts;
     std::uint32_t pipelineCreateCount = 0;
     std::vector<std::array<std::uint32_t, 3>> pipelineSpecializations;
     VkPipeline boundPipeline = VK_NULL_HANDLE;
@@ -2391,6 +2419,19 @@ VKAPI_ATTR VkDeviceAddress VKAPI_CALL mockGetBufferDeviceAddress(VkDevice, const
 VKAPI_ATTR VkResult VKAPI_CALL mockCreatePipelineLayout(VkDevice, const VkPipelineLayoutCreateInfo* info, const VkAllocationCallbacks*, VkPipelineLayout* layout) {
     *layout = makeHandle<VkPipelineLayout>();
     mock.pipelineLayoutPushConstantSize[*layout] = info->pushConstantRangeCount > 0 ? info->pPushConstantRanges[0].size : 0;
+    if (info->setLayoutCount != 0) mock.pipelineLayoutSets[*layout].assign(info->pSetLayouts, info->pSetLayouts + info->setLayoutCount);
+    mock.pipelineLayoutFlags[*layout] = info->flags;
+    if (info->pushConstantRangeCount != 0) mock.pipelineLayoutPushRanges[*layout].assign(info->pPushConstantRanges, info->pPushConstantRanges + info->pushConstantRangeCount);
+    ++mock.live;
+    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL mockCreateGraphicsPipelines(VkDevice, VkPipelineCache, std::uint32_t count, const VkGraphicsPipelineCreateInfo* infos, const VkAllocationCallbacks*, VkPipeline* pipelines) {
+    Require(count == 1 && (infos[0].flags & VK_PIPELINE_CREATE_LIBRARY_BIT_KHR) != 0, "mock expects a graphics pipeline library");
+    const auto* library = static_cast<const VkGraphicsPipelineLibraryCreateInfoEXT*>(infos[0].pNext);
+    Require(library != nullptr && library->sType == VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT, "missing graphics pipeline library description");
+    mock.libraryLayouts[library->flags] = infos[0].layout;
+    *pipelines = makeHandle<VkPipeline>();
     ++mock.live;
     return VK_SUCCESS;
 }
@@ -2405,8 +2446,8 @@ VKAPI_ATTR VkResult VKAPI_CALL mockCreateShaderModule(VkDevice, const VkShaderMo
     return VK_SUCCESS;
 }
 
-VKAPI_ATTR void VKAPI_CALL mockDestroyShaderModule(VkDevice, VkShaderModule, const VkAllocationCallbacks*) {
-    --mock.live;
+VKAPI_ATTR void VKAPI_CALL mockDestroyShaderModule(VkDevice, VkShaderModule module, const VkAllocationCallbacks*) {
+    if (module != VK_NULL_HANDLE) --mock.live;
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL mockCreateComputePipelines(VkDevice, VkPipelineCache, std::uint32_t count, const VkComputePipelineCreateInfo* infos, const VkAllocationCallbacks*, VkPipeline* pipelines) {
@@ -2504,6 +2545,7 @@ PFN_vkVoidFunction VKAPI_CALL mockProc(VkDevice, const char* name) {
         {"vkResetDescriptorPool", reinterpret_cast<PFN_vkVoidFunction>(mockResetDescriptorPool)},
         {"vkUpdateDescriptorSets", reinterpret_cast<PFN_vkVoidFunction>(mockUpdateDescriptorSets)},
         {"vkCmdBindDescriptorSets", reinterpret_cast<PFN_vkVoidFunction>(mockCmdBindDescriptorSets)},
+        {"vkCreateGraphicsPipelines", reinterpret_cast<PFN_vkVoidFunction>(mockCreateGraphicsPipelines)},
         {"vkCreatePipelineLayout", reinterpret_cast<PFN_vkVoidFunction>(mockCreatePipelineLayout)},
         {"vkDestroyPipelineLayout", reinterpret_cast<PFN_vkVoidFunction>(mockDestroyPipelineLayout)},
         {"vkCreateShaderModule", reinterpret_cast<PFN_vkVoidFunction>(mockCreateShaderModule)},
@@ -3358,6 +3400,61 @@ std::vector<std::uint32_t> makeModule(const ModuleShape& shape) {
     words.insert(words.end(), declarations.begin(), declarations.end());
     words.insert(words.end(), function.begin(), function.end());
     return words;
+}
+
+void pipelineLibrarySetTests() {
+    using namespace AgcDriver::Graphics;
+    for (const auto mask : {0u, 1u, 2u, 3u}) {
+        mock = MockVulkan{};
+        auto context = mockContext();
+        context.graphicsPipelineLibrary = true;
+        context.limits.framebufferNoAttachmentsSampleCounts = VK_SAMPLE_COUNT_1_BIT;
+        State state{};
+        ShaderRecompiler::RecompileResult vertex, fragment;
+        vertex.spirv = makeModule({});
+        fragment.spirv = makeModule({.fragment = true});
+        vertex.variantId = 1;
+        fragment.variantId = 2;
+        for (std::uint32_t set = 0; set < 2; ++set) {
+            ShaderRecompiler::DescriptorBinding binding{};
+            binding.descriptorSet = set;
+            if ((mask & (1u << set)) != 0u) fragment.bindings.push_back(binding);
+            else vertex.bindings.push_back(binding);
+        }
+        const std::array<CompiledShader, 2> shaders{{{ShaderRecompiler::ShaderStage::Vertex, &vertex, 0}, {ShaderRecompiler::ShaderStage::Fragment, &fragment, PipelinePushSlotBytes}}};
+        std::array<std::uint32_t, 1> mainKey{11}, fragmentKey{22};
+        PipelineSetLayouts resources{makeHandle<VkDescriptorSetLayout>(), makeHandle<VkDescriptorSetLayout>(), true, mainKey, fragmentKey};
+        const auto prebuild = [&] { Require(Pipeline::Prebuild(context, state, VertexInputLayout{}, resources, shaders), "graphics pipeline library prebuild was skipped"); };
+        prebuild();
+        for (const auto part : {VK_GRAPHICS_PIPELINE_LIBRARY_PRE_RASTERIZATION_SHADERS_BIT_EXT, VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT}) {
+            const auto layout = mock.libraryLayouts.at(part);
+            const auto expectedMask = part == VK_GRAPHICS_PIPELINE_LIBRARY_FRAGMENT_SHADER_BIT_EXT ? mask : mask ^ 3u;
+            const std::vector<VkDescriptorSetLayout> expected{(expectedMask & 1u) != 0u ? resources.main : VK_NULL_HANDLE, (expectedMask & 2u) != 0u ? resources.fragment : VK_NULL_HANDLE};
+            Require(mock.pipelineLayoutSets.at(layout) == expected, "shader library lost a used set or retained an unused set");
+            Require(mock.pipelineLayoutFlags.at(layout) == VK_PIPELINE_LAYOUT_CREATE_INDEPENDENT_SETS_BIT_EXT, "shader library lost independent sets");
+            const auto& pushes = mock.pipelineLayoutPushRanges.at(layout);
+            Require(pushes.size() == 2 && pushes[0].offset == 0 && pushes[0].size == PipelinePushSlotBytes && pushes[0].stageFlags == VK_SHADER_STAGE_VERTEX_BIT && pushes[1].offset == PipelinePushSlotBytes && pushes[1].size == PipelinePushSlotBytes && pushes[1].stageFlags == VK_SHADER_STAGE_FRAGMENT_BIT, "shader library changed push constant slots");
+        }
+        auto before = PipelineLibraryCountersOf(context.device).built;
+        prebuild();
+        Require(PipelineLibraryCountersOf(context.device).built == before, "identical shader libraries were rebuilt");
+        for (std::uint32_t set = 0; set < 2; ++set) {
+            if (set == 0) { ++mainKey[0]; resources.main = makeHandle<VkDescriptorSetLayout>(); }
+            else { ++fragmentKey[0]; resources.fragment = makeHandle<VkDescriptorSetLayout>(); }
+            prebuild();
+            const auto after = PipelineLibraryCountersOf(context.device).built;
+            Require(after[0] == before[0] && after[3] == before[3], "descriptor layout change rebuilt interface libraries");
+            Require(after[1] == before[1] + ((mask & (1u << set)) == 0u ? 1u : 0u), "pre-rasterization library reuse ignored descriptor set usage");
+            Require(after[2] == before[2] + ((mask & (1u << set)) != 0u ? 1u : 0u), "fragment library reuse ignored descriptor set usage");
+            before = after;
+        }
+        ShaderRecompiler::DescriptorBinding invalid{};
+        invalid.descriptorSet = 32;
+        fragment.bindings.push_back(invalid);
+        expectFailure(prebuild, "descriptor set exceeds two slots");
+        ClearPipelineLibraries(context.device);
+        Require(mock.live == 0, "shader library tests leaked Vulkan objects");
+    }
 }
 
 void barycentricEmulationTests() {
@@ -4959,6 +5056,7 @@ int main(int argc, char** argv) {
         }
         RunGuestLeaseWaitTests();
         stateTests();
+        pipelineLibrarySetTests();
         hdrComponentSwapTests();
         depthMaintenanceTests();
         hardwareScreenOffsetTests();

@@ -265,6 +265,9 @@ target_link_libraries(libSceAgcDriver PRIVATE
         jpeg_turbo
         ${CMAKE_DL_LIBS}
 )
+if(APS5_ENABLE_TRACY)
+    target_link_libraries(libSceAgcDriver PUBLIC TracyClient)
+endif()
 
 set_target_properties(libSceAgcDriver PROPERTIES CXX_EXTENSIONS OFF)
 configure_windows_unwind(libSceAgcDriver)
@@ -1213,6 +1216,12 @@ if(BUILD_TESTING)
                 "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     set_tests_properties(agc_driver_provoking_vertex PROPERTIES TIMEOUT 30)
+    add_test(NAME agc_driver_uint8x4_color_target_no_resident COMMAND agc_driver_uint8x4_color_target_tests)
+    set_tests_properties(agc_driver_uint8x4_color_target_no_resident PROPERTIES ENVIRONMENT "ANYPS5_NO_SHADER_CACHE=1;APS5_NO_RESIDENT_TARGETS=1" SKIP_RETURN_CODE 77 WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}" TIMEOUT 30)
+    if(WIN32)
+        set_tests_properties(agc_driver_uint8x4_color_target_no_resident PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
     set_tests_properties(agc_driver_flat_store PROPERTIES RUN_SERIAL TRUE)
     set_target_properties(agc_driver_flat_apertures_tests PROPERTIES EXCLUDE_FROM_ALL OFF)
     foreach(flatAperturesPart RANGE 13)
@@ -1513,6 +1522,15 @@ if(BUILD_TESTING)
     add_test(NAME guest_agc_driver_resources COMMAND guest_agc_driver_resources_tests)
     if(WIN32)
         set_tests_properties(guest_agc_driver_resources PROPERTIES ENVIRONMENT_MODIFICATION
+            "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+    endif()
+    add_test_executable(guest_agc_driver_debug_unavailable_tests ${LIBS_INCLUDE_DIR}/tests/GuestAgcDriverDebugUnavailable.cpp)
+    target_include_directories(guest_agc_driver_debug_unavailable_tests PRIVATE ${LIBS_INCLUDE_DIR})
+    target_link_libraries(guest_agc_driver_debug_unavailable_tests PRIVATE libSceAgcDriver libc)
+    configure_windows_unwind(guest_agc_driver_debug_unavailable_tests)
+    add_test(NAME guest_agc_driver_debug_unavailable COMMAND guest_agc_driver_debug_unavailable_tests)
+    if(WIN32)
+        set_tests_properties(guest_agc_driver_debug_unavailable PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
     add_test_executable(guest_rendering_wait_tests ${LIBS_INCLUDE_DIR}/tests/GuestRenderingWait.cpp)

@@ -1,5 +1,6 @@
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+#include "prx/libSceAgcDriver/Execution/include/PerformanceTrace.hpp"
 #include "prx/libSceAgcDriver/Execution/include/WriteWatchCoverage.hpp"
 #include "ThreadOwned.hpp"
 #include "prx/libc/include/GuestAllocations.hpp"
@@ -1671,7 +1672,17 @@ void AssertGpuLockHeld(const char* where) {
 
 void GpuMutexType::lock() {
     if (!GpuLockProfiled()) {
-        mutex.lock();
+        auto* trace = PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr;
+        if (trace == nullptr) {
+            mutex.lock();
+        } else {
+            const auto site = static_cast<std::size_t>(std::exchange(LockStats().nextSite, GpuLockSite::Other));
+            if (!mutex.try_lock()) {
+                const auto start = std::chrono::steady_clock::now();
+                mutex.lock();
+                trace->Add("GpuMutex.wait", GpuLockSiteNames[site], start, std::chrono::steady_clock::now());
+            }
+        }
         acquired();
         return;
     }
@@ -1689,6 +1700,7 @@ void GpuMutexType::lock() {
         mutex.lock();
         acquired();
         const auto now = std::chrono::steady_clock::now();
+        if (auto* trace = PerformanceTrace::Recording() ? PerformanceTrace::Thread() : nullptr) trace->Add("GpuMutex.wait", GpuLockSiteNames[site], start, now);
         if (holders) {
             HolderMatrixValues after{};
             Holders().Snapshot(after);
@@ -1762,7 +1774,7 @@ void GpuMutexType::lock() {
 
 void TagGpuLockSite(GpuLockSite site) {
     // Off the profiled path the tag is never read, so the thread-local is not touched either.
-    if (!GpuLockProfiled()) return;
+    if (!GpuLockProfiled() && !PerformanceTrace::Recording()) return;
     LockStats().nextSite = site;
 }
 

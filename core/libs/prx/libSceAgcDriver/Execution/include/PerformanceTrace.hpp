@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <map>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <span>
 #include <stdexcept>
@@ -207,6 +208,17 @@ struct TraceSummary {
     std::string trace;
 };
 
+struct TraceGpuRange {
+    const char* name;
+    double beginNs;
+    double endNs;
+};
+
+struct TraceClockSample {
+    double gpuNs = 0;
+    std::chrono::steady_clock::time_point cpu{};
+};
+
 class TraceFormat {
 public:
     using Clock = std::chrono::steady_clock;
@@ -279,6 +291,20 @@ public:
         }
         output += "\n]}\n";
         return output;
+    }
+
+    static std::vector<TraceThread::Slice> GpuSlices(std::span<const TraceGpuRange> ranges, const TraceClockSample& first, const TraceClockSample& last, Clock::time_point origin) {
+        const double gpuSpan = last.gpuNs - first.gpuNs;
+        const double scale = gpuSpan > 0 ? std::chrono::duration<double, std::nano>(last.cpu - first.cpu).count() / gpuSpan : 1.0;
+        const auto map = [&](double gpuNs) { return first.cpu + std::chrono::duration_cast<Clock::duration>(std::chrono::duration<double, std::nano>((gpuNs - first.gpuNs) * scale)); };
+        std::vector<TraceThread::Slice> slices;
+        for (const auto& range : ranges) {
+            const auto begin = map(range.beginNs);
+            const auto end = map(range.endNs);
+            if (end <= begin || begin < origin) continue;
+            slices.push_back({range.name, nullptr, begin, end - begin});
+        }
+        return slices;
     }
 
     static std::string Summary(const TraceSummary& summary, std::span<const TraceThread::Snapshot> threads, std::span<const Clock::time_point> presents) {
@@ -374,8 +400,18 @@ public:
         return configured;
     }
 
-    static void BindThread(const char* name);
+    static void BindThread(const char* name, std::size_t capacity = TraceThread::DefaultCapacity);
     static void Present(std::uint32_t width, std::uint32_t height, const VulkanDevice* device);
+
+    static void GpuRange(const char* name, double beginNs, double endNs) {
+        if (!Recording()) return;
+        std::lock_guard lock(gpuMutex);
+        if (gpuRanges.size() == gpuRanges.capacity()) {
+            gpuDropped = true;
+            return;
+        }
+        gpuRanges.push_back({name, beginNs, endNs});
+    }
 
     static bool Recording() {
         return recording.load(std::memory_order_relaxed);
@@ -385,10 +421,15 @@ public:
         return local;
     }
 
+    static void StopOutput();
+
 private:
     inline static std::atomic<bool> recording{false};
     inline static std::atomic<std::uint64_t> presentCount{0};
     inline static thread_local TraceThread* local = nullptr;
+    inline static std::mutex gpuMutex;
+    inline static std::vector<TraceGpuRange> gpuRanges;
+    inline static bool gpuDropped = false;
 };
 
 }

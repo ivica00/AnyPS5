@@ -12,6 +12,7 @@
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 #include "prx/libkernel/File/include/RandomDevice.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
+#include "prx/libkernel/Equeue/Equeue.hpp"
 #include "SceTypes.hpp"
 
 #include <cerrno>
@@ -285,6 +286,7 @@ int OpenInDirectory_nid_no_patch(int directory, const char* path, int flags, std
 int APS5_VABI sceKernelClose(int d) {
     if (d >= 0 && d < 3) return SCE_KERNEL_ERROR_EPERM;
     if (d >= GuestSockets::FirstDescriptor) return GuestSockets::Close(d) == 0 ? 0 : SceKernelError(*__error_nid_postfix());
+    EqueueDescriptorClosed(d);
     File::ForgetRandomDevice(d);
     File::ForgetDescriptor(d);
     ForgetJitSharedMemory(d);

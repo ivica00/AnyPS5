@@ -17,6 +17,7 @@
 #include "prx/libkernel/File/include/FileLock.hpp"
 #include "prx/libkernel/File/include/RandomDevice.hpp"
 #include "prx/libkernel/KernelErrors.hpp"
+#include "prx/libkernel/Equeue/Equeue.hpp"
 #include "prx/libkernel/Socket/include/SocketRuntime.hpp"
 #include "prx/libkernel/Socket/include/SocketPoll.hpp"
 #include <atomic>
@@ -246,6 +247,7 @@ static std::int64_t NativePwrite(int descriptor, const void* buf, std::size_t nb
 }
 #else
 #include <unistd.h>
+#include <fcntl.h>
 #include <sys/stat.h>
 #include <sys/file.h>
 #include <sys/time.h>
@@ -410,7 +412,7 @@ static int NativeFstatfs(int descriptor, KernelStatfs* fs) {
     constexpr long PipeFilesystem = 0x50495045;
     struct stat file{};
     if (::fstat(descriptor, &file) != 0) return SceErrorFromErrno(errno) & 0xffff;
-    if (S_ISSOCK(file.st_mode)) return GUEST_EINVAL;
+    if (S_ISSOCK(file.st_mode) && (::fcntl(descriptor, F_GETFL) & O_PATH) == 0) return GUEST_EINVAL;
     if (S_ISFIFO(file.st_mode)) {
         struct statfs kind{};
         if (::fstatfs(descriptor, &kind) == 0 && static_cast<long>(kind.f_type) == PipeFilesystem) return GUEST_EINVAL;
@@ -521,6 +523,7 @@ int APS5_VABI close_nid_postfix(int d) {
         *__error_nid_postfix() = socketError;
         return -1;
     }
+    EqueueDescriptorClosed(d);
     File::ForgetRandomDevice(d);
     File::ForgetDescriptor(d);
     ForgetJitSharedMemory(d);
@@ -570,6 +573,7 @@ extern "C" {
 int APS5_VABI dup_nid_postfix(int d) {
     if (d >= GuestSockets::FirstDescriptor) return GuestSockets::Duplicate(d);
     if (d < 0) return PosixFailure(GUEST_EBADF);
+    if (IsKqueueDescriptor(d)) throw std::runtime_error(std::string(__func__) + ": duplicating a kqueue descriptor is not supported");
 #ifdef _WIN32
     const int duplicate = WithoutParameterHandler([d] { return ::_dup(d); });
     if (duplicate >= 0) File::DuplicateDirectoryDescriptor(d, duplicate);
@@ -597,11 +601,13 @@ int APS5_VABI dup2_nid_postfix(int from, int to) {
     if (socketTo)
         throw std::runtime_error(std::string(__func__) + ": moving host descriptor " + std::to_string(from) + " into the guest socket range is not supported");
     const bool sourceIsRandom = File::IsRandomDevice(from);
+    if (from != to && IsKqueueDescriptor(from)) throw std::runtime_error(std::string(__func__) + ": duplicating a kqueue descriptor is not supported");
 #ifdef _WIN32
     if (WithoutParameterHandler([from] { return ::_get_osfhandle(from) == -1 ? -1 : 0; }) != 0) return PosixFailure(GUEST_EBADF);
     if (from == to) return to;
     if (to == 2) PreserveHostStandardError();
     if (WithoutParameterHandler([from, to] { return ::_dup2(from, to); }) != 0) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
+    EqueueDescriptorClosed(to);
     File::ForgetDirectoryDescriptor(to);
     File::DuplicateDirectoryDescriptor(from, to);
     File::ForgetFileLock(to);
@@ -618,6 +624,7 @@ int APS5_VABI dup2_nid_postfix(int from, int to) {
     if (to == 2) PreserveHostStandardError();
     const int result = ::dup2(from, to);
     if (result < 0) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
+    EqueueDescriptorClosed(to);
     File::ForgetRandomDevice(to);
     if (sourceIsRandom) File::RememberRandomDevice(to);
     File::ShareDescriptor(from, to);

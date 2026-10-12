@@ -2358,6 +2358,7 @@ void Recorder::readGpuTiming(Batch& batch) {
         if (batch.batchTiming == 0 && stamps[1] >= stamps[0]) {
             batch.gpuStartNs = static_cast<double>(stamps[0]) * period;
             batch.gpuEndNs = static_cast<double>(stamps[1]) * period;
+            PerformanceTrace::GpuRange("batch", batch.gpuStartNs, batch.gpuEndNs);
         }
         return;
     }
@@ -2373,10 +2374,12 @@ void Recorder::readGpuTiming(Batch& batch) {
             // The whole batch: apart from the per-program totals it contains.
             batch.gpuStartNs = static_cast<double>(stamps[i * 2]) * period;
             batch.gpuEndNs = static_cast<double>(stamps[i * 2 + 1]) * period;
+            PerformanceTrace::GpuRange("batch", batch.gpuStartNs, batch.gpuEndNs);
             timingBatchMs += ns / 1e6;
             continue;
         }
         const auto key = batch.timedKeys[i];
+        if (key >= ClassKey(CommandClass::DispatchLeading) && key < ClassKey(CommandClass::Count)) PerformanceTrace::GpuRange(CommandClassNames[key - ClassKey(CommandClass::DispatchLeading)], static_cast<double>(stamps[i * 2]) * period, static_cast<double>(stamps[i * 2 + 1]) * period);
         auto& totals = timingByKey[key];
         ++totals.count;
         totals.ms += ns / 1e6;

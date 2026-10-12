@@ -31,6 +31,8 @@
 #include <mutex>
 
 extern "C" std::uint64_t GuestImageSegmentBytes_nid_no_patch();
+extern "C" void* APS5_VABI mmap_nid_postfix(void* address, std::size_t length, int protection, int flags, int descriptor, std::int64_t offset) noexcept;
+extern "C" int* APS5_VABI __error_nid_postfix();
 
 namespace {
 
@@ -218,6 +220,13 @@ int APS5_VABI sceKernelMunmap(uint64_t vaddr, size_t len) {
  return result;
 }
 
+int APS5_VABI sceKernelMmap(void* addr, size_t len, int prot, int flags, int fd, int64_t offset, void** res) {
+ void* mapped = mmap_nid_postfix(addr, len, prot, flags, fd, offset);
+ if (mapped == reinterpret_cast<void*>(static_cast<uintptr_t>(-1))) return SceKernelError(*__error_nid_postfix());
+ *res = mapped;
+ return 0;
+}
+
 int APS5_VABI sceKernelReleaseFlexibleMemory(void* addr, size_t len) {
  return sceKernelMunmap(reinterpret_cast<uint64_t>(addr), len);
 }
@@ -370,6 +379,12 @@ int APS5_VABI sceKernelConfiguredFlexibleMemorySize(size_t* size) {
  return 0;
 }
 
+int APS5_VABI sceKernelInternalMemoryGetAvailableSize(size_t* size) {
+ if (!size) return SCE_KERNEL_ERROR_EINVAL;
+ *size = 0;
+ return 0;
+}
+
 int APS5_VABI sceKernelSetVirtualRangeName(const void* addr, uint64_t len, const char* name) {
  const auto start = reinterpret_cast<uintptr_t>(addr);
  if (!addr || len == 0 || !name || len > UINTPTR_MAX - start) return SCE_KERNEL_ERROR_EINVAL;
@@ -388,11 +403,12 @@ int APS5_VABI sceKernelClearVirtualRangeName(const void* addr, uint64_t len) {
 }
 
 int APS5_VABI sceKernelGetPageTableStats(int* cpu_total, int* cpu_available, int* gpu_total, int* gpu_available) {
- (void)cpu_total;
- (void)cpu_available;
- (void)gpu_total;
- (void)gpu_available;
- NotImplemented_nid_no_patch(__func__);
+ if (!cpu_total || !cpu_available || !gpu_total || !gpu_available) return SCE_KERNEL_ERROR_EFAULT;
+ constexpr int pageTableEntries = static_cast<int>((4ull << 30) / (2ull << 20));
+ *cpu_total = pageTableEntries;
+ *cpu_available = pageTableEntries;
+ *gpu_total = pageTableEntries;
+ *gpu_available = pageTableEntries;
  return 0;
 }
 

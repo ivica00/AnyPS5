@@ -25,6 +25,7 @@ namespace AgcDriver {
 namespace {
 
 using Clock = std::chrono::steady_clock;
+constexpr std::size_t GpuRangeCapacity = TraceThread::DefaultCapacity;
 
 struct Session {
     std::mutex mutex;
@@ -34,6 +35,7 @@ struct Session {
     std::uint64_t present = 0;
     std::uint64_t firstPresent = 0;
     double gpuBusyAtOpen = 0;
+    std::optional<TraceClockSample> gpuClock;
     std::vector<Clock::time_point> presents;
 };
 
@@ -91,9 +93,9 @@ std::vector<std::pair<std::string, std::string>> environment() {
 
 }
 
-void PerformanceTrace::BindThread(const char* name) {
+void PerformanceTrace::BindThread(const char* name, std::size_t capacity) {
     if (!Configured() || local != nullptr) return;
-    auto bound = std::make_unique<TraceThread>(name, presentCount);
+    auto bound = std::make_unique<TraceThread>(name, presentCount, capacity);
     auto& state = session();
     std::lock_guard lock(state.mutex);
     local = bound.get();
@@ -114,10 +116,17 @@ void PerformanceTrace::Present(std::uint32_t width, std::uint32_t height, const 
     if (edge == TraceWindow::Edge::Open) {
         state.firstPresent = present;
         state.gpuBusyAtOpen = VulkanDevice::PresentCounts().gpuBusyMs;
+        TraceClockSample clock;
+        if (device != nullptr && device->CalibrateClock(clock.gpuNs, clock.cpu)) state.gpuClock = clock;
+        {
+            std::lock_guard gpu(gpuMutex);
+            gpuRanges.clear();
+            gpuRanges.reserve(GpuRangeCapacity);
+        }
         state.presents.push_back(now);
         presentCount.fetch_add(1, std::memory_order_relaxed);
         recording.store(true, std::memory_order_relaxed);
-        ProfilePrint_nid_no_patch("[trace] recording %s from present %llu\n", state.window->Describe().c_str(), static_cast<unsigned long long>(present));
+        ProfilePrint_nid_no_patch("[trace] recording %s from present %llu%s\n", state.window->Describe().c_str(), static_cast<unsigned long long>(present), state.gpuClock ? "" : "; no GPU track: the device has no calibrated timestamps");
         return;
     }
     if (!recording.load(std::memory_order_relaxed)) return;
@@ -131,6 +140,13 @@ void PerformanceTrace::Present(std::uint32_t width, std::uint32_t height, const 
     for (std::size_t index = 0; index < state.threads.size(); ++index) {
         if (state.threads[index].get() == local) presenter = index;
         snapshots.push_back(state.threads[index]->Collect());
+    }
+    std::vector<TraceThread::Slice> gpuSlices;
+    TraceClockSample clock;
+    if (state.gpuClock && device != nullptr && device->CalibrateClock(clock.gpuNs, clock.cpu)) {
+        std::lock_guard gpu(gpuMutex);
+        gpuSlices = TraceFormat::GpuSlices(gpuRanges, *state.gpuClock, clock, state.presents.front());
+        snapshots.push_back({"gpu", gpuSlices, {}, gpuDropped});
     }
     const auto process = processId();
     TraceSummary summary;
@@ -164,6 +180,10 @@ void PerformanceTrace::Present(std::uint32_t width, std::uint32_t height, const 
     }, std::numeric_limits<std::size_t>::max());
     ProfilePrint_nid_no_patch("[trace] closed at present %llu, writing %s (%zu bytes of JSON)\n", static_cast<unsigned long long>(present), summary.trace.c_str(), events.size());
     output->Write(std::move(events));
+}
+
+void PerformanceTrace::StopOutput() {
+    if (writer()) writer()->Stop();
 }
 
 }

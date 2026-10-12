@@ -140,6 +140,19 @@ void SummaryFields() {
     Check(TraceFormat::Summary(summary, dropped, presents).find("\"trace_dropped\":true") != std::string::npos, "a dropped thread did not mark the summary");
 }
 
+void GpuClock() {
+    const auto origin = Clock::now();
+    const AgcDriver::TraceClockSample first{1000.0, origin + microseconds(10)};
+    const AgcDriver::TraceClockSample last{41000.0, origin + microseconds(30)};
+    const std::vector<AgcDriver::TraceGpuRange> ranges{{"batch", 5000.0, 9000.0}, {"draw", 6000.0, 7000.0}, {"batch", -39000.0, -30000.0}, {"copy", 8000.0, 8000.0}};
+    const auto slices = TraceFormat::GpuSlices(ranges, first, last, origin);
+    Check(slices.size() == 2, "a GPU range before the window or without length was kept");
+    Check(std::string_view(slices[0].scope) == "batch" && slices[0].stage == nullptr && slices[0].begin == origin + microseconds(12) && slices[0].length == microseconds(2), "a GPU range was not mapped between the two calibrations");
+    Check(std::string_view(slices[1].scope) == "draw" && slices[1].begin == origin + std::chrono::nanoseconds(12500) && slices[1].length == std::chrono::nanoseconds(500), "a nested GPU range was not mapped");
+    const AgcDriver::TraceClockSample same{1000.0, origin + microseconds(10)};
+    Check(TraceFormat::GpuSlices(ranges, same, same, origin)[0].begin == origin + microseconds(14), "one calibration does not map at the CPU rate");
+}
+
 void GzipFile() {
     std::string text;
     for (int index = 0; index < 20000; ++index) text += "{\"name\":\"Driver.Packet\",\"ph\":\"X\",\"ts\":" + std::to_string(index) + "}\n";
@@ -196,6 +209,7 @@ int main() {
         EscapeStrings();
         EventsShape();
         SummaryFields();
+        GpuClock();
         GzipFile();
         AppendLines();
         std::cout << "performance trace tests passed\n";
