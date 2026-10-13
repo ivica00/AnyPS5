@@ -871,7 +871,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     }
     if ((read(cx, 0x207) & LayerExports & ~result.layerExports & ~(1u << 21u)) != 0) {
         static bool reported = false;
-        if (!reported) {
+        if (!reported && (!result.hasColorTarget || (result.color.depthSlice == 0 && result.color.arraySlice == 0))) {
             reported = true;
             std::fprintf(stderr, "[gpu] layer/viewport index vertex exports are ignored (PA_CL_VS_OUT_CNTL=0x%08x)\n", read(cx, 0x207));
         }
@@ -1117,6 +1117,7 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot) {
         Require(lastSlice <= (attrib3 & 0x1fffu), "the color view slice is beyond the array surface");
         color.arrayLastSlice = attrib3 & 0x1fffu;
         color.arraySlice = slice;
+        color.layers = lastSlice >= slice ? lastSlice + 1u - slice : 1u;
     }
     if (!volume && lastSlice != slice) {
         const auto exports = find(cx, 0x207);

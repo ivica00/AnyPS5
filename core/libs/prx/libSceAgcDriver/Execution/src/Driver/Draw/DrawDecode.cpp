@@ -117,6 +117,9 @@ std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Su
     product->pixel.alphaToCoverage = product->state.alphaToCoverage;
     if (product->pixel.ancillary) product->pixel.rasterPrimitive = Graphics::RasterPrimitiveOf(product->state);
     if (product->pixel.ancillary) product->pixel.layerExported = product->state.layerExports != 0;
+    if (product->pixel.ancillary) {
+        product->pixel.layerBase = product->pixel.layerExported ? 0u : (product->state.hasColorTarget ? (product->state.color.depth > 1 ? product->state.color.depthSlice : product->state.color.arraySlice) : 0u);
+    }
     return product;
 }
 
