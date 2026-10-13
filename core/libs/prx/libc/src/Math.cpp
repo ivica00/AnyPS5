@@ -454,7 +454,6 @@ float APS5_VABI _FCosh_nid_postfix(float x, float y) { return y * std::cosh(x); 
 struct alignas(16) LibcFloatConstant { std::uint32_t bits[4]; };
 LibcFloatConstant _FInf_nid_postfix {{0x7f800000u, 0, 0, 0}};
 LibcFloatConstant _FNan_nid_postfix {{0x7fc00000u, 0, 0, 0}};
-LibcFloatConstant _Inf_nid_postfix {{0, 0x7ff00000u, 0, 0}};
 
 short APS5_VABI _FDtest_nid_postfix(const float* value) {
     constexpr short Denormal = -2, Finite = -1, Zero = 0, Infinite = 1, NotANumber = 2;
