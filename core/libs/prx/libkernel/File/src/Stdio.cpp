@@ -144,9 +144,9 @@ static int SetTimes(HANDLE handle, const KernelTimeval* times) {
     }
     return SetFileTime(handle, nullptr, &access, &modified) ? 0 : File::WindowsFileTime::Failure(GetLastError());
 }
-static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* times) {
+static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* times, bool followLink = true) {
     const auto handle = CreateFileW(path.c_str(), FILE_WRITE_ATTRIBUTES, FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
-        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS, nullptr);
+        nullptr, OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS | (followLink ? 0 : FILE_FLAG_OPEN_REPARSE_POINT), nullptr);
     if (handle == INVALID_HANDLE_VALUE) return File::WindowsFileTime::Failure(GetLastError());
     const int result = SetTimes(handle, times);
     CloseHandle(handle);
@@ -277,11 +277,11 @@ static int NativeFtruncate(int descriptor, std::int64_t length) {
 static int NativeTruncate(const std::filesystem::path& path, std::int64_t length) {
     return ::truncate(path.c_str(), static_cast<off_t>(length)) == 0 ? 0 : errno;
 }
-static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* times) {
-    if (times == nullptr) return ::utimes(path.c_str(), nullptr);
+static int NativeUtimes(const std::filesystem::path& path, const KernelTimeval* times, bool followLink = true) {
+    if (times == nullptr) return followLink ? ::utimes(path.c_str(), nullptr) : ::lutimes(path.c_str(), nullptr);
     struct timeval values[2]{{static_cast<time_t>(times[0].tv_sec), static_cast<suseconds_t>(times[0].tv_usec)},
         {static_cast<time_t>(times[1].tv_sec), static_cast<suseconds_t>(times[1].tv_usec)}};
-    return ::utimes(path.c_str(), values);
+    return followLink ? ::utimes(path.c_str(), values) : ::lutimes(path.c_str(), values);
 }
 static int NativeFutimes(int descriptor, const KernelTimeval* times) {
     if (times == nullptr) return ::futimes(descriptor, nullptr);
@@ -323,17 +323,17 @@ static constexpr int GUEST_EDEADLK = 11;
 static constexpr int GUEST_ELOOP = 62;
 static constexpr int GUEST_EDQUOT = 69;
 static constexpr int GUEST_EOVERFLOW = 84;
+static constexpr int GUEST_EOPNOTSUPP = 45;
 
 static int SceErrorFromErrno(int error);
 
 static std::int64_t PositionedGuestSocketError(int descriptor) {
-    if (descriptor < GuestSockets::FirstDescriptor) return 0;
-    return SceErrorFromErrno(GuestSockets::IsOpen(descriptor) ? GUEST_ESPIPE : GUEST_EBADF);
+    return GuestSockets::IsOpen(descriptor) ? SceErrorFromErrno(GUEST_ESPIPE) : 0;
 }
 
 static bool FailPosixPositionedGuestSocket(int descriptor) {
-    if (descriptor < GuestSockets::FirstDescriptor) return false;
-    errno = GuestSockets::IsOpen(descriptor) ? GUEST_ESPIPE : GUEST_EBADF;
+    if (!GuestSockets::IsOpen(descriptor)) return false;
+    errno = GUEST_ESPIPE;
     return true;
 }
 
@@ -493,8 +493,6 @@ int File::DuplicateFrom(int fd, int start) {
 #else
     const int duplicate = ::fcntl(fd, F_DUPFD, start);
     if (duplicate < 0) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
-    if (duplicate >= GuestSockets::FirstDescriptor)
-        throw std::runtime_error("fcntl: host descriptor reached the guest socket range");
     if (File::IsRandomDevice(fd)) File::RememberRandomDevice(duplicate);
     File::ShareDescriptor(fd, duplicate);
     return duplicate;
@@ -516,13 +514,13 @@ int APS5_VABI close_nid_postfix(int d) {
         *__error_nid_postfix() = 1;
         return -1;
     }
-    if (d >= GuestSockets::FirstDescriptor) return GuestSockets::Close(d);
     int socketError = 0;
     if (KernelCloseSocket_nid_no_patch(d, &socketError)) {
         if (socketError == 0) return 0;
         *__error_nid_postfix() = socketError;
         return -1;
     }
+    if (GuestSockets::IsOpen(d)) return GuestSockets::Close(d);
     EqueueDescriptorClosed(d);
     File::ForgetRandomDevice(d);
     File::ForgetDescriptor(d);
@@ -550,15 +548,13 @@ void PreserveHostStandardError() {
 #ifdef _WIN32
     const int saved = WithoutParameterHandler([] { return ::_dup(2); });
 #else
-    const int saved = ::dup(2);
+    const int saved = KeepHostStandardError_nid_no_patch();
 #endif
     if (saved < 0) throw std::runtime_error("dup2: cannot keep the host standard error");
     int expected = -1;
     if (!g_hostStandardError.compare_exchange_strong(expected, saved)) {
 #ifdef _WIN32
         _close(saved);
-#else
-        ::close(saved);
 #endif
     }
 }
@@ -571,7 +567,7 @@ int File::HostStandardError() {
 extern "C" {
 
 int APS5_VABI dup_nid_postfix(int d) {
-    if (d >= GuestSockets::FirstDescriptor) return GuestSockets::Duplicate(d);
+    if (GuestSockets::IsOpen(d)) return GuestSockets::Duplicate(d);
     if (d < 0) return PosixFailure(GUEST_EBADF);
     if (IsKqueueDescriptor(d)) throw std::runtime_error(std::string(__func__) + ": duplicating a kqueue descriptor is not supported");
 #ifdef _WIN32
@@ -581,8 +577,6 @@ int APS5_VABI dup_nid_postfix(int d) {
     const int duplicate = ::dup(d);
 #endif
     if (duplicate < 0) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
-    if (duplicate >= GuestSockets::FirstDescriptor)
-        throw std::runtime_error(std::string(__func__) + ": host descriptor reached the guest socket range");
     if (File::IsRandomDevice(d)) File::RememberRandomDevice(duplicate);
     File::ShareDescriptor(d, duplicate);
     DuplicateJitSharedMemory(d, duplicate);
@@ -591,23 +585,30 @@ int APS5_VABI dup_nid_postfix(int d) {
 
 int APS5_VABI dup2_nid_postfix(int from, int to) {
     if (from < 0 || to < 0) return PosixFailure(GUEST_EBADF);
-    const bool socketFrom = from >= GuestSockets::FirstDescriptor;
-    const bool socketTo = to >= GuestSockets::FirstDescriptor;
-    if (socketFrom && socketTo) return GuestSockets::DuplicateTo(from, to);
-    if (socketFrom) {
-        if (!GuestSockets::IsOpen(from)) return PosixFailure(GUEST_EBADF);
-        throw std::runtime_error(std::string(__func__) + ": moving a guest socket onto host descriptor " + std::to_string(to) + " is not supported");
+    if (GuestSockets::IsOpen(from)) {
+        if (from != to && to <= 2)
+            throw std::runtime_error(std::string(__func__) + ": moving a guest socket onto standard descriptor " + std::to_string(to) + " is not supported");
+        if (GuestSockets::DuplicateTo(from, to) < 0) return -1;
+        if (from == to) return to;
+        File::ForgetRandomDevice(to);
+#ifdef _WIN32
+        File::ForgetDirectoryDescriptor(to);
+        File::ForgetFileLock(to);
+#endif
+        return to;
     }
-    if (socketTo)
-        throw std::runtime_error(std::string(__func__) + ": moving host descriptor " + std::to_string(from) + " into the guest socket range is not supported");
     const bool sourceIsRandom = File::IsRandomDevice(from);
     if (from != to && IsKqueueDescriptor(from)) throw std::runtime_error(std::string(__func__) + ": duplicating a kqueue descriptor is not supported");
 #ifdef _WIN32
     if (WithoutParameterHandler([from] { return ::_get_osfhandle(from) == -1 ? -1 : 0; }) != 0) return PosixFailure(GUEST_EBADF);
     if (from == to) return to;
     if (to == 2) PreserveHostStandardError();
-    if (WithoutParameterHandler([from, to] { return ::_dup2(from, to); }) != 0) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
+    auto* const standard = HostStandardHandle_nid_no_patch(to);
+    const int duplicated = WithoutParameterHandler([from, to] { return ::_dup2(from, to); });
+    KeepStandardHandle_nid_no_patch(to, standard);
+    if (duplicated != 0) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
     EqueueDescriptorClosed(to);
+    GuestSockets::Forget(to);
     File::ForgetDirectoryDescriptor(to);
     File::DuplicateDirectoryDescriptor(from, to);
     File::ForgetFileLock(to);
@@ -625,6 +626,7 @@ int APS5_VABI dup2_nid_postfix(int from, int to) {
     const int result = ::dup2(from, to);
     if (result < 0) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
     EqueueDescriptorClosed(to);
+    GuestSockets::Forget(to);
     File::ForgetRandomDevice(to);
     if (sourceIsRandom) File::RememberRandomDevice(to);
     File::ShareDescriptor(from, to);
@@ -634,6 +636,7 @@ int APS5_VABI dup2_nid_postfix(int from, int to) {
 }
 
 int APS5_VABI flock_nid_postfix(int d, int operation) {
+    if (GuestSockets::IsOpen(d)) return PosixFailure(GUEST_EOPNOTSUPP);
     const int type = operation & 8 ? 8 : operation & 2 ? 2 : operation & 1 ? 1 : 0;
     if (type == 0) return PosixFailure(GUEST_EBADF);
     if (NativeFlock(d, type | (operation & 4)) != 0) {
@@ -651,7 +654,7 @@ int APS5_VABI flock_nid_postfix(int d, int operation) {
 }
 
 int APS5_VABI _fstatfs_nid_postfix(int d, KernelStatfs* buf) {
-    if (d >= GuestSockets::FirstDescriptor) return PosixFailure(GuestSockets::IsOpen(d) ? GUEST_EINVAL : GUEST_EBADF);
+    if (GuestSockets::IsOpen(d)) return PosixFailure(GUEST_EINVAL);
     if (d < 0) return PosixFailure(GUEST_EBADF);
     KernelStatfs result{};
     result.f_version = KERNEL_STATFS_VERSION;
@@ -667,12 +670,13 @@ int64_t APS5_VABI fstat_nid_disambig1_nid_postfix(int d, FileStat* sb) {
     if (sb == nullptr) {
         APS5_INVALID_ARG_EX;
     }
-    File::FillFileStat(d, sb);
+    if (GuestSockets::IsOpen(d)) throw std::runtime_error(std::string(__func__) + ": the status of a guest socket is not implemented");
+    if (!File::FillFileStatFromDescriptor(d, sb)) return PosixFailure(SceErrorFromErrno(errno) & 0xffff);
     return 0;
 }
 
 int APS5_VABI ftruncate_nid_postfix(int d, int64_t length) {
-    if (length < 0) {
+    if (length < 0 || GuestSockets::IsOpen(d)) {
         return PosixFailure(GUEST_EINVAL);
     }
 #ifdef _WIN32
@@ -750,6 +754,7 @@ int64_t APS5_VABI pread_nid_postfix(int d, void* buf, size_t nbytes, int64_t off
     if (!destination.Open()) errno = EFAULT;
     else if (File::ReadRandomDevice(d, buf, nbytes)) return static_cast<int64_t>(nbytes);
     auto n = destination.Open() ? NativePread(d, buf, nbytes, offset) : -1;
+    if (n < 0 && errno == EBADF) return PosixFailure(GUEST_EBADF);
     if (n < 0) {
         throw std::runtime_error(std::string(__func__) + ": pread failed, fd=" + std::to_string(d) + ", errno=" + std::to_string(errno));
     }
@@ -766,14 +771,14 @@ int64_t APS5_VABI pwrite_nid_disambig1_nid_postfix(int d, const void* buf, size_
 }
 
 int64_t APS5_VABI read_nid_postfix(int d, void* buf, uint64_t nbytes) {
-    if (d >= GuestSockets::FirstDescriptor) return GuestSockets::Read(d, buf, static_cast<size_t>(nbytes));
+    if (GuestSockets::IsOpen(d)) return GuestSockets::Read(d, buf, static_cast<size_t>(nbytes));
     if (buf == nullptr && nbytes != 0) return PosixFailure(GUEST_EFAULT);
     char emptyBuffer = 0;
     return PosixResult(sceKernelRead(d, buf == nullptr ? &emptyBuffer : buf, static_cast<size_t>(nbytes)));
 }
 
 std::int64_t APS5_VABI _read_nid_postfix(int descriptor, void* buffer, std::size_t count) {
-    if (descriptor >= GuestSockets::FirstDescriptor) return GuestSockets::Read(descriptor, buffer, count);
+    if (GuestSockets::IsOpen(descriptor)) return GuestSockets::Read(descriptor, buffer, count);
     if (buffer == nullptr && count != 0) return PosixFailure(GUEST_EFAULT);
     char emptyBuffer = 0;
     return PosixResult(sceKernelRead(descriptor, buffer == nullptr ? &emptyBuffer : buffer, count));
@@ -783,14 +788,14 @@ int64_t APS5_VABI write_nid_postfix(int d, const char* str, int64_t size) {
     if (size < 0) {
         APS5_INVALID_ARG_EX;
     }
-    if (d >= GuestSockets::FirstDescriptor) return GuestSockets::Write(d, str, static_cast<std::size_t>(size));
+    if (GuestSockets::IsOpen(d)) return GuestSockets::Write(d, str, static_cast<std::size_t>(size));
     if (str == nullptr && size != 0) return PosixFailure(GUEST_EFAULT);
     const char emptyBuffer = 0;
     return PosixResult(sceKernelWrite(d, str == nullptr ? &emptyBuffer : str, static_cast<size_t>(size)));
 }
 
 std::int64_t APS5_VABI _write_nid_postfix(int descriptor, const void* buffer, std::size_t count) {
-    if (descriptor >= GuestSockets::FirstDescriptor) return GuestSockets::Write(descriptor, buffer, count);
+    if (GuestSockets::IsOpen(descriptor)) return GuestSockets::Write(descriptor, buffer, count);
     if (buffer == nullptr && count != 0) return PosixFailure(GUEST_EFAULT);
     const char emptyBuffer = 0;
     return PosixResult(sceKernelWrite(descriptor, buffer == nullptr ? &emptyBuffer : buffer, count));
@@ -828,18 +833,20 @@ int APS5_VABI sceKernelCheckReachability(const char* path) {
     if (std::strlen(path) > 255) return SCE_KERNEL_ERROR_ENAMETOOLONG;
     std::filesystem::path native;
     if (const int error = ResolvePathError_nid_no_patch(path, native)) return SceKernelError(error);
+    native = File::PathOrRelinkedModule(native);
     std::error_code error;
     return std::filesystem::exists(native, error) ? 0 : SCE_KERNEL_ERROR_ENOENT;
 }
 
 int APS5_VABI sceKernelFstat(int d, FileStat* sb) {
     if (sb == nullptr) throw std::invalid_argument("sceKernelFstat: sb is null");
+    if (GuestSockets::IsOpen(d)) throw std::runtime_error("sceKernelFstat: the status of a guest socket is not implemented");
     if (!File::FillFileStatFromDescriptor(d, sb)) return SceErrorFromErrno(errno);
     return 0;
 }
 
 int APS5_VABI sceKernelFsync(int fd) {
-    if (fd >= GuestSockets::FirstDescriptor) return SceErrorFromErrno(GuestSockets::IsOpen(fd) ? GUEST_EINVAL : GUEST_EBADF);
+    if (GuestSockets::IsOpen(fd)) return SceErrorFromErrno(GUEST_EINVAL);
 #ifdef _WIN32
     if (NativeSync(fd) != 0) return SceErrorFromErrno(errno);
 #else
@@ -849,7 +856,7 @@ int APS5_VABI sceKernelFsync(int fd) {
 }
 
 int APS5_VABI sceKernelFdatasync(int fd) {
-    if (fd >= GuestSockets::FirstDescriptor) return SceErrorFromErrno(GuestSockets::IsOpen(fd) ? GUEST_EINVAL : GUEST_EBADF);
+    if (GuestSockets::IsOpen(fd)) return SceErrorFromErrno(GUEST_EINVAL);
 #ifdef _WIN32
     if (NativeSync(fd) != 0) return SceErrorFromErrno(errno);
 #else
@@ -870,6 +877,7 @@ int APS5_VABI sceKernelWriteThrottlingStatus(std::uint64_t* status) {
 #ifdef _WIN32
 
 int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep) {
+    if (GuestSockets::IsOpen(fd)) return SceErrorFromErrno(GUEST_EINVAL);
     if (buf == nullptr) return SceErrorFromErrno(GUEST_EFAULT);
     if (nbytes <= 0) return SceErrorFromErrno(GUEST_EINVAL);
     if (basep != nullptr) *basep = 0;
@@ -883,6 +891,7 @@ int APS5_VABI sceKernelGetdents(int fd, char* buf, int nbytes) {
 #else
 
 int APS5_VABI sceKernelGetdirentries(int fd, char* buf, int nbytes, int64_t* basep) {
+    if (GuestSockets::IsOpen(fd)) return SceErrorFromErrno(GUEST_EINVAL);
     constexpr std::size_t GuestHeaderBytes = 8;
     constexpr std::size_t GuestMaxName = 255;
     if (buf == nullptr) return SceErrorFromErrno(GUEST_EFAULT);
@@ -1013,7 +1022,7 @@ static std::int64_t TransferIovecs(int d, const KernelIovec* iov, int iovcnt, co
     }
     std::deque<GuestArena::HostWrite> destinations;
     if (!write && !OpenIovecs(iov, iovcnt, destinations)) return SceErrorFromErrno(GUEST_EFAULT);
-    if (offset == nullptr && d >= GuestSockets::FirstDescriptor) {
+    if (offset == nullptr && GuestSockets::IsOpen(d)) {
         const auto result = write ? GuestSockets::Writev(d, reinterpret_cast<const GuestSockets::Iovec*>(iov), iovcnt)
                                   : GuestSockets::Readv(d, reinterpret_cast<const GuestSockets::Iovec*>(iov), iovcnt);
         return result < 0 ? SceKernelError(*__error_nid_postfix()) : result;
@@ -1081,7 +1090,7 @@ int64_t APS5_VABI sceKernelReadv(int d, const KernelIovec* iov, int iovcnt) {
     if (const int error = CheckIovecs(iov, iovcnt)) return error;
     std::deque<GuestArena::HostWrite> destinations;
     if (!OpenIovecs(iov, iovcnt, destinations)) return SceErrorFromErrno(GUEST_EFAULT);
-    if (d >= GuestSockets::FirstDescriptor) {
+    if (GuestSockets::IsOpen(d)) {
         const auto result = GuestSockets::Readv(d, reinterpret_cast<const GuestSockets::Iovec*>(iov), iovcnt);
         return result < 0 ? SceKernelError(*__error_nid_postfix()) : result;
     }
@@ -1092,7 +1101,7 @@ int64_t APS5_VABI sceKernelReadv(int d, const KernelIovec* iov, int iovcnt) {
 
 int64_t APS5_VABI sceKernelWritev(int d, const KernelIovec* iov, int iovcnt) {
     if (const int error = CheckIovecs(iov, iovcnt)) return error;
-    if (d >= GuestSockets::FirstDescriptor) {
+    if (GuestSockets::IsOpen(d)) {
         const auto result = GuestSockets::Writev(d, reinterpret_cast<const GuestSockets::Iovec*>(iov), iovcnt);
         return result < 0 ? SceKernelError(*__error_nid_postfix()) : result;
     }
@@ -1188,7 +1197,7 @@ int APS5_VABI sceKernelChmod_nid_postfix(const char* path, std::uint16_t mode) {
 }
 
 int APS5_VABI sceKernelFchmod(int d, std::uint16_t mode) {
-    if (d >= GuestSockets::FirstDescriptor) return SceErrorFromErrno(GuestSockets::IsOpen(d) ? GUEST_EINVAL : GUEST_EBADF);
+    if (GuestSockets::IsOpen(d)) return SceErrorFromErrno(GUEST_EINVAL);
     if (NativeFchmod(d, mode & 07777) != 0) return SceErrorFromErrno(errno);
     return 0;
 }
@@ -1236,8 +1245,21 @@ int APS5_VABI utimes_nid_postfix(const char* path, const KernelTimeval* times) {
     return PosixResult(sceKernelUtimes_nid_postfix(path, times));
 }
 
+int APS5_VABI lutimes_nid_postfix(const char* path, const KernelTimeval* times) {
+    if (const int error = PathError(path)) return PosixFailure(error);
+    if (times != nullptr) {
+        for (int i = 0; i < 2; ++i) {
+            if (times[i].tv_usec < 0 || times[i].tv_usec >= 1000000) return PosixFailure(GUEST_EINVAL);
+        }
+    }
+    std::filesystem::path native;
+    if (const int error = ResolvePathError_nid_no_patch(path, native)) return PosixFailure(error);
+    if (NativeUtimes(native, times, false) != 0) return PosixResult(SceErrorFromErrno(errno));
+    return 0;
+}
+
 int APS5_VABI sceKernelFutimes(int d, const KernelTimeval* times) {
-    if (d >= GuestSockets::FirstDescriptor) return SceErrorFromErrno(GuestSockets::IsOpen(d) ? GUEST_EINVAL : GUEST_EBADF);
+    if (GuestSockets::IsOpen(d)) return SceErrorFromErrno(GUEST_EINVAL);
     if (times != nullptr) {
         for (int i = 0; i < 2; ++i) {
             if (times[i].tv_usec < 0 || times[i].tv_usec >= 1000000) return SceErrorFromErrno(GUEST_EINVAL);

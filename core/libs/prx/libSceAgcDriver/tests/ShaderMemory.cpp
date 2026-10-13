@@ -12,6 +12,7 @@
 #include "Optimization/SrtWalker/SrtFlatSlotClasses.hpp"
 #include "Optimization/SrtWalker.hpp"
 #include "IntermediateRepresentation/IrBuilder.hpp"
+#include "IntermediateRepresentation/IrProgram.hpp"
 #include "SpirvBackend/SpirvAnalysis.hpp"
 #if ANYPS5_ENABLE_SPIRV_TOOLS
 #include "SpirvBackend/SpirvOptimizer.hpp"
@@ -1660,6 +1661,22 @@ void verifyMeshConfiguration() {
     request.graphics = GraphicsCompileContext{0u, {}, mesh, std::nullopt, {}};
     const auto replay = RequestSerializer{}.Deserialize(RequestSerializer{}.Serialize(request));
     require(replay.request.graphics.has_value() && replay.request.graphics->mesh.has_value() && replay.request.graphics->mesh->esgsItemSize == 12u && replay.request.graphics->mesh->primitivesPerGroup == 21u, "mesh configuration was lost in serialization");
+    {
+        RecompileRequest vertex{};
+        vertex.shader = {ShaderStage::Vertex, 0x10000u, code, 0, {}};
+        vertex.context.waveSize = 64;
+        ShaderVertexStageInfo info{};
+        info.paClVsOutCntl = 0x0040000fu;
+        vertex.context.vertex = info;
+        const auto back = RequestSerializer{}.Deserialize(RequestSerializer{}.Serialize(vertex));
+        require(back.request.context.vertex.has_value() && back.request.context.vertex->paClVsOutCntl == 0x0040000fu, "PA_CL_VS_OUT_CNTL was lost in serialization");
+        std::vector<std::uint64_t> clipped;
+        RecompileCacheKey::Build(vertex, clipped);
+        vertex.context.vertex->paClVsOutCntl = 0;
+        std::vector<std::uint64_t> unclipped;
+        RecompileCacheKey::Build(vertex, unclipped);
+        require(clipped != unclipped, "PA_CL_VS_OUT_CNTL is not part of the recompile cache key");
+    }
     std::vector<std::uint64_t> key;
     RecompileCacheKey::Build(request, key);
     const auto first = key;
@@ -1807,15 +1824,122 @@ void verifyPixelRequestSerialization() {
     minimal.shader = {ShaderStage::Fragment, 0x30000u, code, 0, {}};
     minimal.context.waveSize = 64;
     minimal.context.pixel = ShaderPixelStageInfo{};
+    minimal.context.pixel->rasterPrimitive = RasterPrimitive::Rectangle;
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQRIAAAA=", "new requests did not use serialization version 18");
+    require(requestPrefix(encoded, 8u) == "NVNQQRQAAAA=", "new requests did not use serialization version 20");
+    require(serializer.Deserialize(encoded).request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle, "the pixel primitive class did not round-trip");
     constexpr std::size_t mappingOffset = 8u + 37u + 18u + 163u;
-    for (std::size_t bytes = 0; bytes < 19u; ++bytes) {
-        expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage or stencil reference export flag was accepted");
+    for (std::size_t bytes = 0; bytes < 20u; ++bytes) {
+        expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage, stencil reference export flag or primitive class was accepted");
     }
-    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRMAAAA="}) {
+    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRUAAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
     }
+    static constexpr std::string_view version18Request{
+        "NVNQQRIAAAAFAAADAAAAAAABAAAAAAAAAAAAgb8AAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAABAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA"
+        "AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAQAAAAAAAAAB0gQAAAE="};
+    const auto version18 = serializer.Deserialize(version18Request);
+    require(version18.request.context.pixel.has_value() && version18.request.context.pixel->rasterPrimitive == RasterPrimitive::Triangle, "a version 18 request read a primitive class");
+    require(version18.request.target.registrationModules && version18.request.target.registrationWordLimit == 1234u && version18.request.target.vertexSubgroups, "a version 18 request trailer was misread");
+}
+
+void verifyPositionExportComponents() {
+    constexpr std::uint32_t none = 0xffffffffu;
+    struct Case {
+        std::uint32_t control;
+        std::array<std::uint32_t, 4> clip;
+        std::array<std::uint32_t, 4> cull;
+    };
+    const std::array<Case, 6> cases{{
+        {0x00400000u, {none, none, none, none}, {none, none, none, none}},
+        {0x00400001u, {0u, none, none, none}, {none, none, none, none}},
+        {0x00400002u, {none, 0u, none, none}, {none, none, none, none}},
+        {0x00400005u, {0u, none, 1u, none}, {none, none, none, none}},
+        {0x00400100u, {none, none, none, none}, {0u, none, none, none}},
+        {0x00400400u, {none, none, none, none}, {none, none, 0u, none}},
+    }};
+    for (const auto& test : cases) {
+        for (std::uint32_t component = 0; component < 4; ++component) {
+            const auto output = ShaderRecompiler::DecodePositionExportComponent(test.control, 1u, component);
+            require(output.clipDistance == test.clip[component] && output.cullDistance == test.cull[component], "PA_CL_VS_OUT_CNTL decoded a position component to the wrong clip or cull distance");
+        }
+    }
+}
+
+std::vector<std::uint8_t> decodeBase64(std::string_view text) {
+    constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::vector<std::uint8_t> bytes;
+    std::uint32_t chunk = 0;
+    std::size_t bits = 0;
+    for (const char symbol : text) {
+        if (symbol == '=') break;
+        const auto value = alphabet.find(symbol);
+        require(value != std::string_view::npos, "invalid base64 symbol");
+        chunk = ((chunk << 6u) | static_cast<std::uint32_t>(value)) & 0xffffffu;
+        bits += 6u;
+        if (bits >= 8u) {
+            bits -= 8u;
+            bytes.push_back(static_cast<std::uint8_t>((chunk >> bits) & 0xffu));
+        }
+    }
+    return bytes;
+}
+
+std::string encodeBase64(const std::vector<std::uint8_t>& bytes) {
+    constexpr std::string_view alphabet = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/";
+    std::string text;
+    for (std::size_t index = 0; index < bytes.size(); index += 3u) {
+        const std::size_t count = std::min<std::size_t>(3u, bytes.size() - index);
+        std::uint32_t chunk = static_cast<std::uint32_t>(bytes[index]) << 16u;
+        if (count > 1u) chunk |= static_cast<std::uint32_t>(bytes[index + 1u]) << 8u;
+        if (count > 2u) chunk |= bytes[index + 2u];
+        for (std::size_t symbol = 0; symbol < 4u; ++symbol) {
+            text.push_back(symbol <= count ? alphabet[(chunk >> (18u - 6u * symbol)) & 0x3fu] : '=');
+        }
+    }
+    return text;
+}
+
+void verifyVertexInfoVersion19() {
+    using namespace ShaderRecompiler;
+    const std::array<std::uint32_t, 1> code{0xbf810000u};
+    const RequestSerializer serializer;
+    RecompileRequest vertex{};
+    vertex.shader = {ShaderStage::Vertex, 0x10000u, code, 0, {}};
+    vertex.context.waveSize = 64;
+    vertex.context.vertex = ShaderVertexStageInfo{};
+    const auto unmarked = serializer.Serialize(vertex);
+    vertex.context.vertex->paClVsOutCntl = 0x89abcdefu;
+    const auto marked = serializer.Serialize(vertex);
+    const auto plain = decodeBase64(unmarked);
+    const auto flagged = decodeBase64(marked);
+    require(plain.size() == flagged.size(), "PA_CL_VS_OUT_CNTL changed the request size");
+    std::size_t offset = 0;
+    while (offset < plain.size() && plain[offset] == flagged[offset]) ++offset;
+    require(offset + 4u <= plain.size() && flagged[offset] == 0xefu && flagged[offset + 1u] == 0xcdu && flagged[offset + 2u] == 0xabu && flagged[offset + 3u] == 0x89u, "PA_CL_VS_OUT_CNTL is not the four bytes the version 20 vertex info adds");
+    require(std::equal(plain.begin() + offset + 4u, plain.end(), flagged.begin() + offset + 4u), "PA_CL_VS_OUT_CNTL moved the fields after it");
+    auto legacy = plain;
+    legacy.erase(legacy.begin() + offset, legacy.begin() + offset + 4u);
+    for (const auto version : {16u, 17u, 18u, 19u}) {
+        legacy[4] = static_cast<std::uint8_t>(version);
+        const auto replay = serializer.Deserialize(encodeBase64(legacy));
+        require(replay.request.context.vertex.has_value() && replay.request.context.vertex->paClVsOutCntl == 0u, "a legacy vertex info read a PA_CL_VS_OUT_CNTL word");
+        require(serializer.Serialize(replay.request) == unmarked, "a legacy vertex info misread the fields after it");
+    }
+    RecompileRequest pixel{};
+    pixel.shader = {ShaderStage::Fragment, 0x20000u, code, 0, {}};
+    pixel.context.waveSize = 64;
+    pixel.context.pixel = ShaderPixelStageInfo{};
+    pixel.context.pixel->rasterPrimitive = RasterPrimitive::Rectangle;
+    const auto encodedPixel = serializer.Serialize(pixel);
+    auto legacyPixel = decodeBase64(encodedPixel);
+    legacyPixel[4] = 19u;
+    const auto replayPixel = serializer.Deserialize(encodeBase64(legacyPixel));
+    require(replayPixel.request.context.pixel.has_value() && replayPixel.request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle, "a main version 19 request lost its pixel primitive class");
+    require(serializer.Serialize(replayPixel.request) == encodedPixel, "a main version 19 request misread the fields after its pixel primitive class");
 }
 
 void verifyLegacyPixelRequests() {
@@ -1904,6 +2028,7 @@ void verifyLegacyPixelRequests() {
         require(!pixel.dualSourceBlend, "a legacy request enabled dual-source blending");
         require(!pixel.alphaToCoverage, "a legacy request enabled alpha-to-coverage");
         require(!pixel.stencilRefExportEnable, "a legacy request exported a stencil reference");
+        require(pixel.rasterPrimitive == RasterPrimitive::Triangle, "a legacy request drew something other than triangles");
         require(pixel.inputAddr == 2u && pixel.hasPerspectiveCenterVgpr && pixel.targetOutputMode[0] == 9u, "legacy pixel layout was misread");
         require(pixel.conservativeZExport == (version >= 7u ? ConservativeZExport::GreaterThanZ : ConservativeZExport::AnyZ), "legacy conservative Z layout was misread");
         require(!pixel.orderedPixelShader, "a legacy request became a primitive-ordered pixel shader");
@@ -2263,6 +2388,71 @@ void verifyInt64AtomicCapabilities() {
     require(declares(compile(bufferAtomic, spv::CapabilityInt64Atomics), spv::CapabilityInt64Atomics), "64-bit atomics: a buffer_atomic_inc_x2 does not declare Int64Atomics");
     expectFailure([&] { static_cast<void>(compile(imageAtomic, spv::CapabilityShader)); }, "64-bit image atomics need VK_EXT_shader_image_atomic_int64", "64-bit atomics: an image_atomic_swap on a 32_32 image compiled without shaderImageInt64Atomics");
     require(declares(compile(imageAtomic, spv::CapabilityInt64ImageEXT), spv::CapabilityInt64ImageEXT), "64-bit atomics: an image_atomic_swap on a 32_32 image does not declare Int64ImageEXT");
+}
+
+void verifySpecializedBufferAtomicBindings() {
+    using namespace ShaderRecompiler;
+    const std::array<std::string_view, 2> extensions{"SPV_KHR_physical_storage_buffer", "SPV_KHR_8bit_storage"};
+    const std::array<std::uint32_t, 3> capabilities{spv::CapabilityInt64, spv::CapabilityPhysicalStorageBufferAddresses, spv::CapabilityStorageBuffer8BitAccess};
+    alignas(256) static std::array<std::uint32_t, 64> buffer{};
+    const auto bufferAddress = static_cast<std::uint64_t>(reinterpret_cast<std::uintptr_t>(buffer.data()));
+    const std::array<std::uint32_t, 16> userData{
+        0u, 0u, 0u, 0u,
+        static_cast<std::uint32_t>(bufferAddress), static_cast<std::uint32_t>((bufferAddress >> 32u) & 0xffffu), 256u, 0x31016facu,
+        0u, 0u, 0u, 0u,
+        0u, 0u, 0u, 0u};
+    const std::vector<std::uint32_t> code{0xe0f05000u, 0x80012803u, 0xbf810000u};
+    const auto compile = [&](std::span<const std::uint32_t> supported) {
+        RecompileRequest request{};
+        request.shader = {ShaderStage::Compute, 0x58800u, code, 0, {}};
+        request.context.waveSize = 32;
+        request.context.userDataBaseRegister = 0;
+        request.context.userData = userData;
+        request.context.compute = ShaderComputeStageInfo{{32u, 1u, 1u}, 0u, {false, false, false}, false, 1u};
+        request.target.vulkanVersion = 0x00401000u;
+        request.target.spirvVersion = 0x00010300u;
+        request.target.subgroupSize = 32;
+        request.target.bdaAbiVersion = BdaAbi::Version;
+        request.target.supportedCapabilities = supported;
+        request.target.supportedExtensions = extensions;
+        request.target.fragmentShaderBarycentricEnabled = false;
+        request.layout.pushConstantSizeBytes = 128;
+        request.useCache = false;
+        return Recompile(request);
+    };
+    const auto result = compile(capabilities);
+    std::size_t tables = 0;
+    std::size_t faults = 0;
+    std::size_t atomicElements = 0;
+    for (const auto& binding : result.bindings) {
+        if (binding.role == DescriptorRole::BdaPagetable) ++tables;
+        if (binding.role == DescriptorRole::FaultBuffer) ++faults;
+        atomicElements += static_cast<std::size_t>(std::count(binding.bufferAtomic.begin(), binding.bufferAtomic.end(), true));
+    }
+    require(tables == 0, "specialized buffer atomic: a buffer_atomic_inc through a V# the program specializes binds the address tables");
+    require(faults == 1 && result.bdaAbiVersion == BdaAbi::Version, "specialized buffer atomic: the program has no fault buffer for its unaligned atomic");
+    require(atomicElements == 1, "specialized buffer atomic: the V# element is not reported as atomic");
+    const std::vector<std::uint32_t>& words = result.spirv;
+    std::uint32_t faultFunction = 0;
+    std::size_t faultCalls = 0;
+    bool physical = false;
+    bool int64 = false;
+    for (std::size_t cursor = 5; cursor < words.size();) {
+        const auto count = words[cursor] >> 16u;
+        const auto opcode = words[cursor] & 0xffffu;
+        require(count != 0 && count <= words.size() - cursor, "specialized buffer atomic: truncated SPIR-V instruction");
+        if (opcode == spv::OpCapability && words[cursor + 1] == spv::CapabilityPhysicalStorageBufferAddresses) physical = true;
+        if (opcode == spv::OpCapability && words[cursor + 1] == spv::CapabilityInt64) int64 = true;
+        if (opcode == spv::OpMemoryModel && words[cursor + 1] != spv::AddressingModelLogical) physical = true;
+        if (opcode == spv::OpName && std::string_view(reinterpret_cast<const char*>(&words[cursor + 2])) == "record_bda_fault") faultFunction = words[cursor + 1];
+        if (opcode == spv::OpFunctionCall && faultFunction != 0 && words[cursor + 3] == faultFunction) ++faultCalls;
+        cursor += count;
+    }
+    require(!physical, "specialized buffer atomic: the module addresses physical storage without an address access");
+    require(int64, "specialized buffer atomic: the fault address is 64-bit and the module does not declare Int64");
+    require(faultFunction != 0 && faultCalls == 1, "specialized buffer atomic: an unaligned atomic does not record exactly one fault");
+    const std::array<std::uint32_t, 1> shaderOnly{spv::CapabilityShader};
+    expectFailure([&] { static_cast<void>(compile(shaderOnly)); }, "buffer atomic fault addresses require shaderInt64", "specialized buffer atomic: the program compiled without shaderInt64");
 }
 
 void verifyCoherentBufferAccesses() {
@@ -2760,11 +2950,16 @@ void verifyBdaReadFallbackFunctions() {
             std::map<std::string, std::uint32_t> definitions;
             const auto reader = std::string("read_bda_dword_bytes") + (barrier ? "" : "_stop") + (coherent ? "_coherent" : "");
             const auto span = std::string("read_bda_span") + (barrier ? "" : "_stop") + (coherent ? "_coherent" : "");
+            const auto loader = std::string("load_bda_span") + (coherent ? "_coherent" : "");
             std::string function;
             std::size_t compareExchanges = 0;
             std::size_t mainLookups = 0;
             std::size_t mainProbes = 0;
             std::size_t spanCalls = 0;
+            std::size_t spanLoads = 0;
+            std::size_t spanLoaderCalls = 0;
+            std::size_t loaderLoads = 0;
+            std::size_t loaderCalls = 0;
             std::array<std::size_t, 2> readerLoads{};
             for (std::size_t cursor = 5; cursor < five.size();) {
                 const auto length = five[cursor] >> 16u;
@@ -2773,7 +2968,7 @@ void verifyBdaReadFallbackFunctions() {
                 if (op == spv::OpName) names[five[cursor + 1]] = reinterpret_cast<const char*>(&five[cursor + 2]);
                 if (op == spv::OpFunction) {
                     function = names[five[cursor + 2]];
-                    if (function == "record_bda_fault" || function.starts_with("read_bda_dword_bytes") || function.starts_with("read_bda_span")) {
+                    if (function == "record_bda_fault" || function.starts_with("read_bda_dword_bytes") || function.starts_with("read_bda_span") || function.starts_with("load_bda_span")) {
                         require((five[cursor + 3] & spv::FunctionControlDontInlineMask) != 0u, "BDA read functions: a fault, byte read or span read function may be inlined");
                         ++definitions[function];
                     }
@@ -2785,10 +2980,16 @@ void verifyBdaReadFallbackFunctions() {
                     if (callee == "probe_bda_pointer" || callee.starts_with("read_bda_dword_bytes")) ++mainProbes;
                     if (callee == span) ++spanCalls;
                 }
+                if ((op == spv::OpLoad || op == spv::OpAtomicLoad) && function == span) ++spanLoads;
+                if (op == spv::OpFunctionCall && function == span && names[five[cursor + 3]] == loader) ++spanLoaderCalls;
+                if ((op == spv::OpLoad || op == spv::OpAtomicLoad) && function == loader) ++loaderLoads;
+                if (op == spv::OpFunctionCall && function == loader) ++loaderCalls;
                 if (op == spv::OpLoad && function == reader) ++readerLoads[length > 4u && (five[cursor + 4] & spv::MemoryAccessVolatileMask) != 0u];
                 cursor += length;
             }
             require(definitions["record_bda_fault"] == 1u && definitions[reader] == 1u && definitions[span] == 1u, "BDA read functions: the fault, byte read and span read functions are not defined");
+            require(definitions[loader] == 1u && loaderLoads == 4u && loaderCalls == 0u, "BDA read functions: the span load function does not hold the four in-place loads and nothing else");
+            require(spanLoads == 0u && spanLoaderCalls == 1u, "BDA read functions: a span read function loads in place itself");
             for (const auto& [name, count] : definitions) require(count == 1u, "BDA read functions: a function is defined twice");
             require(compareExchanges == 1u, "BDA read functions: a fault is recorded outside record_bda_fault");
             require(mainLookups == 0u, "BDA read functions: a read site looks up its bytes inline");
@@ -3284,6 +3485,8 @@ int main(int argc, char** argv) {
         verifyMeshConfiguration();
         verifyPixelInputs();
         verifyPixelRequestSerialization();
+        verifyVertexInfoVersion19();
+        verifyPositionExportComponents();
         verifyLegacyPixelRequests();
         verifyPixelExportReplay();
         verifyPixelParameterSlots();
@@ -3291,6 +3494,7 @@ int main(int argc, char** argv) {
         verifyComputedTexelOffsets();
         verifyShaderClockScopes();
         verifyInt64AtomicCapabilities();
+        verifySpecializedBufferAtomicBindings();
         verifyCoherentBufferAccesses();
         verifyUnnormalizedSamplers();
         verifyUnusedUnnormalizedSampler();

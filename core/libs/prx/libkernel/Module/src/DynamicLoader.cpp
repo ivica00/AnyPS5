@@ -300,13 +300,6 @@ static void InitializeDeferredModule(HMODULE native) {
 }
 #endif
 
-static std::filesystem::path RelinkedModulePath(const std::filesystem::path& path) {
-    auto relinked = path;
-    relinked += ".guest.prx";
-    std::error_code error;
-    return std::filesystem::is_regular_file(relinked, error) ? relinked : path;
-}
-
 void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
     if ((flags & ~0x103) || (flags & 3) == 0 || (flags & 3) == 3) {
         Error("dlopen: unsupported flags"); return nullptr;
@@ -320,7 +313,7 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
             module->owned = false;
         } else {
             if (!*path) { Error("dlopen: empty module path"); return nullptr; }
-            const auto resolved = RelinkedModulePath(ResolvePath_nid_no_patch(path));
+            const auto resolved = RelinkedModulePath_nid_no_patch(ResolvePath_nid_no_patch(path));
             FILE* file = _wfopen(resolved.c_str(), L"rb");
             if (file) {
                 std::uint16_t magic = 0;
@@ -347,7 +340,7 @@ void* APS5_VABI dlopen_nid_postfix(const char* path, int flags) {
             __aps5_set_module_init_result_nid_no_patch(StartDeferredModule(module->native, pending.args, pending.argp));
         }
 #else
-        const auto resolved = path ? RelinkedModulePath(ResolvePath_nid_no_patch(path)).string() : std::string{};
+        const auto resolved = path ? RelinkedModulePath_nid_no_patch(ResolvePath_nid_no_patch(path)).string() : std::string{};
         const int nativeFlags = ((flags & 3) == 1 ? RTLD_LAZY : RTLD_NOW) |
             ((flags & 0x100) ? RTLD_GLOBAL : RTLD_LOCAL);
         module->native = ::dlopen(path ? resolved.c_str() : nullptr, nativeFlags);

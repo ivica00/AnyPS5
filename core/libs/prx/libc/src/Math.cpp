@@ -200,6 +200,7 @@ double APS5_VABI fabs_nid_postfix(double x) { return std::fabs(x); }
 int APS5_VABI abs_nid_postfix(int x) { return x < 0 ? static_cast<int>(0u - static_cast<unsigned>(x)) : x; }
 double APS5_VABI trunc_nid_postfix(double x) { return std::trunc(x); }
 double APS5_VABI ceil_nid_postfix(double x) { return std::ceil(x); }
+double APS5_VABI floor_nid_postfix(double x) { return std::floor(x); }
 double APS5_VABI fma_nid_postfix(double x, double y, double z) { return std::fma(x, y, z); }
 long double APS5_VABI acosl_nid_postfix(long double x) { return std::acos(x); }
 
@@ -296,7 +297,10 @@ void APS5_VABI sincos_nid_postfix(double x, double* sinp, double* cosp) {
 
 float APS5_VABI atanf_nid_postfix(float x) { return std::atan(x); }
 double APS5_VABI atan2_nid_postfix(double y, double x) { return std::atan2(y, x); }
-float APS5_VABI powf_nid_postfix(float base, float exp) { return std::pow(base, exp); }
+float APS5_VABI powf_nid_postfix(float base, float exp) {
+    if (base == 1.0f) return 1.0f;
+    return std::pow(base, exp);
+}
 double APS5_VABI pow_nid_postfix(double base, double exp) { return std::pow(base, exp); }
 float APS5_VABI __powisf2_nid_postfix(float base, int exponent) {
     const bool reciprocal = exponent < 0;

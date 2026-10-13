@@ -280,6 +280,12 @@ struct ModuleInfoForUnwind {
     std::uint64_t seg0_size;
 };
 
+struct InternalSegmentInfo {
+    std::uint64_t address;
+    std::uint64_t size;
+};
+static_assert(sizeof(InternalSegmentInfo) == 0x10);
+
 struct MallocReplace {
     std::uint64_t size = sizeof(MallocReplace);
     void* malloc_initialize = nullptr;
@@ -1258,6 +1264,13 @@ struct NetEpollEvent {
 struct NetCtlNatInfo { std::uint8_t opaque[128]; };
 
 union NetCtlInfo { std::uint8_t opaque[256]; };
+
+struct NetCtlIfStat {
+    std::uint32_t device;
+    std::uint64_t tx_bytes;
+    std::uint64_t rx_bytes;
+    std::uint32_t reserved[8];
+};
 
 using NetCtlCallback = void (*)(int, void*);
 

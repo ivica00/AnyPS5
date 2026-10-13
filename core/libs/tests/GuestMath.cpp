@@ -34,6 +34,7 @@ double APS5_VABI fabs_nid_postfix(double);
 int APS5_VABI abs_nid_postfix(int);
 double APS5_VABI trunc_nid_postfix(double);
 double APS5_VABI ceil_nid_postfix(double);
+double APS5_VABI floor_nid_postfix(double);
 double APS5_VABI nearbyint_nid_postfix(double);
 double APS5_VABI fma_nid_postfix(double, double, double);
 long double APS5_VABI acosl_nid_postfix(long double);
@@ -59,6 +60,7 @@ int APS5_VABI rand_nid_postfix();
 void APS5_VABI srand_nid_postfix(unsigned int);
 int APS5_VABI rand_r_nid_postfix(unsigned int*);
 float APS5_VABI log10f_nid_postfix(float);
+float APS5_VABI powf_nid_postfix(float, float);
 double APS5_VABI log1p_nid_postfix(double);
 float APS5_VABI log1pf_nid_postfix(float);
 double APS5_VABI expm1_nid_postfix(double);
@@ -146,6 +148,15 @@ static void CheckExactOperations() {
     Require(std::fesetround(FE_DOWNWARD) == 0);
     const bool ceilIgnoresRounding = ceil_nid_postfix(2.2) == 3. && ceil_nid_postfix(-2.7) == -2.;
     Require(std::fesetround(FE_TONEAREST) == 0 && ceilIgnoresRounding);
+    Require(floor_nid_postfix(2.7) == 2. && floor_nid_postfix(-2.2) == -3. && floor_nid_postfix(5.) == 5.);
+    Require(std::bit_cast<std::uint64_t>(floor_nid_postfix(-0.5)) == 0xbff0000000000000ull);
+    Require(std::bit_cast<std::uint64_t>(floor_nid_postfix(-0.)) == 0x8000000000000000ull && floor_nid_postfix(-0x1p-1074) == -1.);
+    Require(std::bit_cast<std::uint64_t>(floor_nid_postfix(0.5)) == 0);
+    Require(floor_nid_postfix(4503599627370495.5) == 4503599627370495. && floor_nid_postfix(-1e300) == -1e300);
+    Require(floor_nid_postfix(INFINITY) == INFINITY && floor_nid_postfix(-INFINITY) == -INFINITY && std::isnan(floor_nid_postfix(nan)));
+    Require(std::fesetround(FE_UPWARD) == 0);
+    const bool floorIgnoresRounding = floor_nid_postfix(2.7) == 2. && floor_nid_postfix(-2.2) == -3.;
+    Require(std::fesetround(FE_TONEAREST) == 0 && floorIgnoresRounding);
     Require(fma_nid_postfix(2., 3., 4.) == 10.);
     volatile double tenth = 0.1;
     Require(fma_nid_postfix(tenth, 10., -1.) == 0x1p-54);
@@ -196,6 +207,10 @@ static void CheckExp2Errno() {
     Require(errno == 0);
     Require(std::isinf(result) && result > 0);
     Require(std::fetestexcept(FE_OVERFLOW | FE_INEXACT) == (FE_OVERFLOW | FE_INEXACT));
+}
+
+static void CheckPowfSpecialValue() {
+    Require(std::bit_cast<std::uint32_t>(powf_nid_postfix(1.0f, std::bit_cast<float>(0x7f800001u))) == 0x3f800000u);
 }
 
 static void CheckLongDouble() {
@@ -788,6 +803,7 @@ int main() {
     Require(negativeDenominator.quot == -3 && negativeDenominator.rem == 1);
     const auto minimum = div_nid_postfix(std::numeric_limits<int>::min(), 10);
     Require(minimum.quot == -214748364 && minimum.rem == -8);
+    CheckPowfSpecialValue();
     Require(abs_nid_postfix(0) == 0);
     Require(abs_nid_postfix(42) == 42);
     Require(abs_nid_postfix(-42) == 42);

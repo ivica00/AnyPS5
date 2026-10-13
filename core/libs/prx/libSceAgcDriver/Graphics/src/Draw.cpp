@@ -686,6 +686,9 @@ bool ValidationKey(const Context& context, std::span<const CompiledShader> shade
         add(context.subgroup.supportedStages);
         add(context.subgroup.supportedOperations);
         add(context.fragmentShaderBarycentric);
+        add(context.shaderClipDistance);
+        add(context.shaderCullDistance);
+        add(state.paClVsOutCntl);
         add(state.stages.mesh.has_value());
         if (state.stages.mesh) {
             const auto& mesh = *state.stages.mesh;
@@ -737,7 +740,7 @@ std::set<std::uint32_t> CachedFragmentOutputs(const Context& context, std::span<
     }
     std::set<std::uint32_t> outputs;
     try {
-        outputs = ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric, context.descriptorIndexing, context.imageInt64Atomics, context.geometryShader, context.sampleRateShading, context.bufferInt64Atomics, context.shaderClipDistance);
+        outputs = ValidateShaders(shaders, state, context.subgroup, context.fragmentShaderBarycentric, context.descriptorIndexing, context.imageInt64Atomics, context.geometryShader, context.sampleRateShading, context.bufferInt64Atomics, context.shaderClipDistance, context.shaderCullDistance);
     } catch (const std::exception& error) {
         if (keyed) {
             std::lock_guard lock(validationMutex());
@@ -2037,7 +2040,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
                 return IndirectDrawPath::PendingImage;
             }
             if (recorder != nullptr && recorder->PendingLabelIn(address, bytes)) return IndirectDrawPath::PendingLabelOrCopy;
-            const auto overlaps = [&](const auto& writer) { return writer->WritesOverlap(address, bytes); };
+            const auto overlaps = [&](const auto& writer) { return writer->CopiedWritesOverlap(address, bytes); };
             if (context.copiedWriters != nullptr && std::any_of(context.copiedWriters->begin(), context.copiedWriters->end(), overlaps)) return IndirectDrawPath::PendingLabelOrCopy;
             if (std::any_of(DrawCopiedWriters()->begin(), DrawCopiedWriters()->end(), overlaps)) return IndirectDrawPath::PendingLabelOrCopy;
             if ((import = HostImportFor(context, address, bytes)) == nullptr) return IndirectDrawPath::NotImported;

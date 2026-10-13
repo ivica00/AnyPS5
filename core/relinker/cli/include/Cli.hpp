@@ -30,6 +30,7 @@ struct Args {
     std::set<std::string> excludedSceModules;
     std::set<std::string> guestModuleDirectories;
     std::vector<std::string> moduleDirectories;
+    std::vector<std::string> executables;
 };
 
 Args ParseArgs(int argc, char* argv[]);
