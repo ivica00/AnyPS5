@@ -136,10 +136,11 @@ void storeSingleTexels(const Context& context, const ColorTarget& color) {
     MarkDccUncompressed(context, color.dccAddress, color.bytes, colorKeyCount(color, color.bytes));
 }
 
-void materializeRegisterClear(const Context& context, const ColorTarget& color, StorageTexture& resident) {
+void materializeDccClear(const Context& context, const ColorTarget& color, StorageTexture& resident) {
     if (color.dccAddress == 0 || resident.Descriptor().dccAddress != color.dccAddress) return;
-    if (ProvedCurrentDccKeys(color.dccAddress, color.bytes, resident.TargetKeyProof()) != DccKeys::ClearRegister) return;
-    const auto texel = clearTexel(color, DccKeys::ClearRegister);
+    auto keys = ProvedCurrentDccKeys(color.dccAddress, color.bytes, resident.TargetKeyProof());
+    if (!IsDccClear(keys)) return;
+    auto texel = clearTexel(color, keys);
     const char* refusal = nullptr;
     bool cleared = clearToTexel(resident, texel, color.elementBytes, refusal);
     const auto keyBytes = static_cast<std::size_t>(color.bytes / 256);
@@ -147,7 +148,9 @@ void materializeRegisterClear(const Context& context, const ColorTarget& color, 
         if (auto* recorder = Recorder::Active(); recorder != nullptr && recorder->PendingWriteOverlaps(color.dccAddress, keyBytes)) {
             Recorder::CountSync(2);
             recorder->SyncThrough(color.dccAddress, keyBytes);
-            if (CurrentDccKeys(color.dccAddress, color.bytes) != DccKeys::ClearRegister) return;
+            keys = CurrentDccKeys(color.dccAddress, color.bytes);
+            if (!IsDccClear(keys)) return;
+            texel = clearTexel(color, keys);
             cleared = clearToTexel(resident, texel, color.elementBytes, refusal);
         }
     }
@@ -1222,7 +1225,7 @@ std::shared_ptr<StorageTexture> refreshResidentTarget(const Context& context, co
     std::shared_ptr<StorageTexture> resident;
     try {
         resident = lookup();
-        if (resident != nullptr) materializeRegisterClear(context, color, *resident);
+        if (resident != nullptr) materializeDccClear(context, color, *resident);
     } catch (const std::exception& error) {
         static std::mutex reportMutex;
         static std::set<std::uint64_t> reported;
