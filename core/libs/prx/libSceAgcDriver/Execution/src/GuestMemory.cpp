@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <map>
 #include <unordered_map>
 #include <vector>
 #ifdef _WIN32
@@ -1059,14 +1060,14 @@ bool collectMemoEnabled() {
 // thread that never bumps its epoch never match (each collect gets a fresh epoch), as intended.
 // APS5_SHARED_COLLECT_MEMO=1 uses the tracker's shared ring under its mutex instead.
 struct ThreadCollectMemo {
-    std::array<WriteTracker::Memo, 64> entries{};
+    std::array<WriteTracker::Memo, 256> entries{};
     std::size_t next = 0;
 };
 thread_local ThreadCollectMemo threadCollectMemo;
 
 struct EpochCollectMap {
     std::uint64_t epoch = 0;
-    std::unordered_map<std::uintptr_t, WriteTracker::Memo> ranges;
+    std::map<std::uintptr_t, WriteTracker::Memo> ranges;
 };
 
 EpochCollectMap& epochCollectMap(std::uint64_t epoch) {
@@ -1171,9 +1172,15 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
         // initialized and watched; nothing below the lock needs asking.
         if (epochCollectMapEnabled()) {
             const auto& map = epochCollectMap(epoch);
-            if (const auto found = map.ranges.find(first); found != map.ranges.end() && found->second.unwatched == unwatched && stop <= found->second.end) {
-                collectMemoHits.fetch_add(1, std::memory_order_relaxed);
-                return tracker.generation.load(std::memory_order_relaxed);
+            if (!map.ranges.empty()) {
+                const auto it = map.ranges.upper_bound(first);
+                if (it != map.ranges.begin()) {
+                    const auto& memo = std::prev(it)->second;
+                    if (memo.unwatched == unwatched && first >= memo.begin && stop <= memo.end) {
+                        collectMemoHits.fetch_add(1, std::memory_order_relaxed);
+                        return tracker.generation.load(std::memory_order_relaxed);
+                    }
+                }
             }
         }
         for (const auto& entry : threadCollectMemo.entries) {
@@ -1215,8 +1222,14 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
         else {
             threadCollectMemo.entries[threadCollectMemo.next++ % threadCollectMemo.entries.size()] = {first, stop, epoch, serial};
             if (epochCollectMapEnabled()) {
-                auto& entry = epochCollectMap(epoch).ranges[first];
-                if (entry.unwatched != serial || entry.end < stop) entry = {first, stop, epoch, serial};
+                auto& ranges = epochCollectMap(epoch).ranges;
+                const auto it = ranges.upper_bound(first);
+                bool covered = false;
+                if (it != ranges.begin()) {
+                    const auto& prev = std::prev(it)->second;
+                    if (prev.unwatched == serial && first >= prev.begin && stop <= prev.end) covered = true;
+                }
+                if (!covered) ranges[first] = {first, stop, epoch, serial};
             }
         }
     }
