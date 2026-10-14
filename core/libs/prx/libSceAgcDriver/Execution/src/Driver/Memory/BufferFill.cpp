@@ -268,7 +268,7 @@ bool Driver::fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<cons
     ++fills;
     filledBytes += bytes;
     if (bytes == 0) return true;
-    const auto store = [this, queueId, base, bytes, pattern, localDevice] {
+    const auto store = [this, queueId, base, bytes, pattern, localDevice, hasMemoryFill = memoryFill.has_value()] {
         GuestMemory::TagGpuLockSite(GuestMemory::GpuLockSite::Fill);
         std::lock_guard gpuLock(GuestMemory::GpuMutex());
         const auto holdStart = profile ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
@@ -328,7 +328,7 @@ bool Driver::fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<cons
         const bool stored = cleared || absorbed || localDevice->FillBuffer(base, bytes, pattern);
         phase(FillDevice);
         if (stored && !cleared && !absorbed) {
-            if (const auto filled = KeysFillMemo(pattern, uniformKeysFill, memoryFill.has_value())) Graphics::NoteKeysFillOnGpu(base, bytes, *filled);
+            if (const auto filled = KeysFillMemo(pattern, uniformKeysFill, hasMemoryFill)) Graphics::NoteKeysFillOnGpu(base, bytes, *filled);
         }
         if (profile && stored && !cleared && !absorbed) {
             ++(uniform ? uniformFills : patternFills);

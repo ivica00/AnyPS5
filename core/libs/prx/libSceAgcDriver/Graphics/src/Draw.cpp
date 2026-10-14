@@ -2478,10 +2478,16 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
     // from the cache is a miss: the ordinary path looks up anew.
     std::vector<std::shared_ptr<StorageTexture>> targets;
     targets.reserve(recipe.targets.size());
+    const bool passContinued = recorder != nullptr && recorder->RenderPassOpen() && recorder->RenderPassKey() == recipe.passKey;
     for (std::size_t index = 0; index < recipe.targets.size(); ++index) {
         timer.phase(PhaseSetup);
         auto stored = recipe.targets[index].lock();
         if (stored == nullptr || !StorageImageCached(context, stored.get()) || !StorageImageServesKeys(*stored, state.colors[index].dccAddress)) return miss(DrawRecipeMiss::TargetGone);
+        if (passContinued) {
+            if (profile) ++outcome.targetLookups;
+            targets.push_back(std::move(stored));
+            continue;
+        }
         auto resident = refreshResidentTarget(context, state, state.colors[index], outcome, profile, [&] {
             stored->Refresh();
             return stored;
