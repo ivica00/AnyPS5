@@ -1,7 +1,11 @@
+#include <filesystem>
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+
+#include <cstdio>
+#include <cstdlib>
 
 namespace AgcDriver::DriverDetail {
 
@@ -117,6 +121,13 @@ std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Su
     product->pixel.alphaToCoverage = product->state.alphaToCoverage;
     if (product->pixel.ancillary) product->pixel.rasterPrimitive = Graphics::RasterPrimitiveOf(product->state);
     if (product->pixel.ancillary) product->pixel.layerExported = product->state.layerExports != 0;
+    if (product->pixel.ancillary) {
+        product->pixel.layerBase = product->pixel.layerExported ? 0u : (product->state.hasColorTarget ? (product->state.color.depth > 1 ? product->state.color.depthSlice : product->state.color.arraySlice) : 0u);
+    }
+    if (std::getenv("APS5_DUMP_STORAGE") != nullptr && (std::getenv("APS5_LUT_CAPTURE_GATE") == nullptr || std::filesystem::exists(std::getenv("APS5_LUT_CAPTURE_GATE"))) && product->state.hasColorTarget && product->state.color.extent.width == 32 && product->state.color.extent.height == 32 && product->state.color.depth == 32) {
+        static unsigned traces = 0;
+        if (traces++ < 128) std::fprintf(stderr, "[lut-draw] surface=%llx slice=%u depth=%u ancillary=%d exports=%u base=%u\n", static_cast<unsigned long long>(product->state.color.surfaceAddress), product->state.color.depthSlice, product->state.color.depth, product->pixel.ancillary, product->state.layerExports, product->pixel.layerBase);
+    }
     return product;
 }
 

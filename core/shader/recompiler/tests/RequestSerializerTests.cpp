@@ -45,5 +45,13 @@ int main() {
     const auto withPreserve = serializer.Deserialize(serializer.Serialize(request));
     Require(withPreserve.request.target.float16DenormPreserve);
 
+    request.context.pixel.emplace();
+    request.context.pixel->layerExported = true;
+    request.context.pixel->layerBase = 29u;
+    const auto withLayer = serializer.Deserialize(serializer.Serialize(request));
+    Require(withLayer.request.context.pixel.has_value());
+    Require(withLayer.request.context.pixel->layerExported);
+    Require(withLayer.request.context.pixel->layerBase == 29u);
+
     return 0;
 }

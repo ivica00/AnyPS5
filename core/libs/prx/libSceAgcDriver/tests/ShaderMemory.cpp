@@ -1883,13 +1883,15 @@ void verifyPixelRequestSerialization() {
     minimal.context.pixel = ShaderPixelStageInfo{};
     minimal.context.pixel->rasterPrimitive = RasterPrimitive::Rectangle;
     minimal.context.pixel->layerExported = true;
+    minimal.context.pixel->layerBase = 7u;
     const auto encoded = serializer.Serialize(minimal);
     require(requestPrefix(encoded, 8u) == "NVNQQRgAAAA=", "new requests did not use serialization version 24");
     require(serializer.Deserialize(encoded).request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle, "the pixel primitive class did not round-trip");
     require(serializer.Deserialize(encoded).request.context.pixel->layerExported, "the pixel layer export did not round-trip");
+    require(serializer.Deserialize(encoded).request.context.pixel->layerBase == 7u, "the pixel layer base did not round-trip");
     constexpr std::size_t mappingOffset = 8u + 37u + 18u + 163u;
-    for (std::size_t bytes = 0; bytes < 22u; ++bytes) {
-        expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage, stencil reference export flag, primitive class or layer export flag was accepted");
+    for (std::size_t bytes = 0; bytes < 26u; ++bytes) {
+        expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage, stencil reference export flag, primitive class, layer export flag or layer base was accepted");
     }
     for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRkAAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
@@ -2009,11 +2011,17 @@ void verifyVertexInfoVersion19() {
     std::size_t flagOffset = 0;
     while (flagOffset < legacyPixel.size() && legacyPixel[flagOffset] == exportedBytes[flagOffset]) ++flagOffset;
     require(flagOffset < legacyPixel.size(), "the pixel layer export flag is not serialized");
-    legacyPixel.erase(legacyPixel.begin() + static_cast<std::ptrdiff_t>(flagOffset));
+    auto version23Pixel = legacyPixel;
+    version23Pixel.erase(version23Pixel.begin() + static_cast<std::ptrdiff_t>(flagOffset + 1u), version23Pixel.begin() + static_cast<std::ptrdiff_t>(flagOffset + 5u));
+    version23Pixel[4] = 23u;
+    const auto replay23 = serializer.Deserialize(encodeBase64(version23Pixel));
+    require(replay23.request.context.pixel.has_value() && replay23.request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle && !replay23.request.context.pixel->layerExported && replay23.request.context.pixel->layerBase == 0u, "a version 23 request lost its pixel primitive class or read an uninitialized layer base");
+    require(serializer.Serialize(replay23.request) == encodedPixel, "a version 23 request misread the fields after its pixel layer export flag");
+    legacyPixel.erase(legacyPixel.begin() + static_cast<std::ptrdiff_t>(flagOffset), legacyPixel.begin() + static_cast<std::ptrdiff_t>(flagOffset + 5u));
     for (const auto version : {19u, 20u, 21u, 22u}) {
         legacyPixel[4] = static_cast<std::uint8_t>(version);
         const auto replayPixel = serializer.Deserialize(encodeBase64(legacyPixel));
-        require(replayPixel.request.context.pixel.has_value() && replayPixel.request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle && !replayPixel.request.context.pixel->layerExported, "a main version 19 to 22 request lost its pixel primitive class or read a layer export flag");
+        require(replayPixel.request.context.pixel.has_value() && replayPixel.request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle && !replayPixel.request.context.pixel->layerExported && replayPixel.request.context.pixel->layerBase == 0u, "a main version 19 to 22 request lost its pixel primitive class or read a layer export flag");
         require(serializer.Serialize(replayPixel.request) == encodedPixel, "a main version 19 to 22 request misread the fields after its pixel primitive class");
     }
 }

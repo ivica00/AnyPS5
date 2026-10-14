@@ -28,6 +28,8 @@ void Driver::lookupDraw(const Submission& submission, const std::shared_ptr<Vulk
                 const auto& tess = *graphics.stages.tessellation;
                 for (const auto value : {tess.inputControlPoints, tess.outputControlPoints, tess.domain, tess.partitioning, tess.outputTopology, tess.patchesPerGroup, tess.primitiveGroupSize, static_cast<std::uint32_t>(tess.breakAtInstance)}) mix(value);
             }
+            mix(pixel.layerExported);
+            mix(pixel.layerBase);
             mix(graphics.rectList);
             mix(programs.size());
             for (std::size_t i = 0; i < programs.size(); ++i) {

@@ -131,7 +131,7 @@ constexpr std::size_t fieldCount() {
     }
 }
 
-static_assert(fieldCount<ShaderInfo>() == 23, "ShaderInfo changed: update the info encoder");
+static_assert(fieldCount<ShaderInfo>() == 24, "ShaderInfo changed: update the info encoder");
 static_assert(fieldCount<BufferResource>() == 12, "BufferResource changed: update the info encoder");
 static_assert(fieldCount<ImageResource>() == 37, "ImageResource changed: update the info encoder");
 static_assert(fieldCount<SamplerResource>() == 7, "SamplerResource changed: update the info encoder");
@@ -624,6 +624,7 @@ void encodeShaderInfo(Writer& writer, const ShaderInfo& info) {
     writer.Value(info.dispatchThreadLimit);
     writer.Value(info.rasterPrimitive);
     writer.Value(info.layerExported);
+    writer.Value(info.layerBase);
 }
 
 void decodeShaderInfo(Reader& reader, ShaderInfo& info) {
@@ -726,6 +727,7 @@ void decodeShaderInfo(Reader& reader, ShaderInfo& info) {
     reader.Value(info.dispatchThreadLimit);
     reader.Value(info.rasterPrimitive);
     reader.Value(info.layerExported);
+    reader.Value(info.layerBase);
 }
 
 void encodeInfo(Writer& writer, const CompiledShaderInfo& compiled) {
