@@ -1391,6 +1391,25 @@ void verifyHalfWaveReduction() {
     };
     require(reductions(vertex(scan(0xffffffffu, 0x26000000u, 0x83800000u), 32u), spv::OpGroupNonUniformUMin) == 1u, "half-wave reduction: the wave64 vertex UMin scan, whose entry EXEC is every invocation, did not read lane 31 as a subgroup UMin on 32 lanes");
     require(halves(vertex(scan(0x80000000u, 0x24000000u, 0x84000000u), 64u), spv::OpGroupNonUniformSMax, 0x80000000u), "half-wave reduction: the wave64 vertex SMax scan did not read lanes 31 and 63 as reductions of host invocations 0-31 and 32-63 on 64 lanes");
+    const auto domain = [](std::vector<std::uint32_t> code, std::uint32_t subgroupSize) {
+        *std::find(code.begin(), code.end(), 0xf800180fu) = 0xf80008cfu;
+        *std::find(code.begin(), code.end(), 0x7e160f00u) = 0x7e160f01u;
+        RecompileRequest request{};
+        request.shader = {ShaderStage::TessellationEvaluation, 0x10000u, code, 0, {}};
+        request.context.waveSize = 64;
+        request.context.vertex = ShaderVertexStageInfo{};
+        request.target.vulkanVersion = 0x00401000u;
+        request.target.spirvVersion = 0x00010300u;
+        request.target.subgroupSize = subgroupSize;
+        request.target.supportedCapabilities = capabilities;
+        request.target.fragmentShaderBarycentricEnabled = false;
+        request.layout.pushConstantSizeBytes = 128;
+        request.graphics = GraphicsCompileContext{0u, {}, std::nullopt, TessellationConfiguration{3u, 3u, 1u, 2u, 2u}, {}};
+        request.useCache = false;
+        return Recompile(request).spirv;
+    };
+    require(reductions(domain(scan(0xffffffffu, 0x26000000u, 0x83800000u), 32u), spv::OpGroupNonUniformUMin) == 1u, "half-wave reduction: the wave64 domain UMin scan under s_orn2_saveexec_b64 vcc, exec did not read lane 31 as a subgroup UMin on 32 lanes");
+    require(halves(domain(scan(0u, 0x38000000u, 0x88000000u), 64u), spv::OpGroupNonUniformBitwiseOr, 0u), "half-wave reduction: the wave64 domain OR scan did not read lanes 31 and 63 as reductions of host invocations 0-31 and 32-63 on 64 lanes");
     const auto floatScan = [&scan](std::uint32_t identity, std::uint32_t vector, std::uint32_t join) {
         auto code = scan(identity, vector, 0u);
         code[23] = join;
@@ -1432,6 +1451,7 @@ void verifyHalfWaveReduction() {
     auto overwritten = umin;
     overwritten.insert(overwritten.begin() + 17, {0x7ef80500u, 0x7e008514u});
     expectFailure([&] { static_cast<void>(pixel(overwritten, 32u, true)); }, lane63, "half-wave reduction: a scan of window registers read lane 63 after a v_movreld_b32 at a runtime M0 that may overwrite them");
+    require(reductions(domain(divergent, 32u), spv::OpGroupNonUniformUMin) == 1u, "half-wave reduction: domain keys masked inside a divergent branch did not read lane 31 as a subgroup UMin on 32 lanes");
     const char* arithmetic = "v_readlane_b32 of lane 31 of a wave64 half-wave reduction scan needs subgroup arithmetic";
     expectFailure([&] { static_cast<void>(pixel(umin, 32u, false)); }, arithmetic, "half-wave reduction: a device without subgroup arithmetic read lane 31 on 32 lanes");
     expectFailure([&] { static_cast<void>(pixel(umin, 64u, false)); }, arithmetic, "half-wave reduction: a device without subgroup arithmetic read lane 31 on 64 lanes");
@@ -1689,10 +1709,10 @@ void verifyMeshConfiguration() {
     RecompileRequest hull{};
     hull.shader = {ShaderStage::TessellationControl, 0x10000u, code, 0, {}};
     hull.context.waveSize = 64;
-    hull.graphics = GraphicsCompileContext{0u, {}, std::nullopt, TessellationConfiguration{4u, 4u, 2u, 2u, 3u, 63u}, {}};
+    hull.graphics = GraphicsCompileContext{0u, {}, std::nullopt, TessellationConfiguration{4u, 4u, 2u, 2u, 3u, 63u, 63u, true}, {}};
     const auto hullReplay = RequestSerializer{}.Deserialize(RequestSerializer{}.Serialize(hull));
     const auto* replayed = hullReplay.request.graphics && hullReplay.request.graphics->tessellation ? &*hullReplay.request.graphics->tessellation : nullptr;
-    require(replayed != nullptr && replayed->domain == 2u && replayed->outputTopology == 3u && replayed->patchesPerGroup == 63u, "the quad tessellation configuration or its patches per group were lost in serialization");
+    require(replayed != nullptr && replayed->domain == 2u && replayed->outputTopology == 3u && replayed->patchesPerGroup == 63u && replayed->primitiveGroupSize == 63u && replayed->breakAtInstance, "the quad tessellation configuration, its patches per group, its primitive group size or BREAK_WAVE_AT_EOI were lost in serialization");
     auto grouped = hull;
     grouped.graphics->tessellation->patchesPerGroup = 62u;
     for (const auto stage : {ShaderStage::Local, ShaderStage::TessellationControl, ShaderStage::TessellationEvaluation}) {
@@ -1702,6 +1722,26 @@ void verifyMeshConfiguration() {
         const auto patchKey = key;
         RecompileCacheKey::Build(grouped, key);
         require((key != patchKey) == (stage != ShaderStage::Local), "only the hull and domain cache keys may depend on the patches per group, which bound their relative patch index");
+    }
+    auto primitiveGrouped = hull;
+    primitiveGrouped.graphics->tessellation->primitiveGroupSize = 126u;
+    for (const auto stage : {ShaderStage::Local, ShaderStage::TessellationControl, ShaderStage::TessellationEvaluation}) {
+        hull.shader.stage = stage;
+        primitiveGrouped.shader.stage = stage;
+        RecompileCacheKey::Build(hull, key);
+        const auto patchKey = key;
+        RecompileCacheKey::Build(primitiveGrouped, key);
+        require((key != patchKey) == (stage != ShaderStage::Local), "only the hull and domain cache keys may depend on the primitive group size, which rebuilds their relative patch index");
+    }
+    auto shared = hull;
+    shared.graphics->tessellation->breakAtInstance = false;
+    for (const auto stage : {ShaderStage::Local, ShaderStage::TessellationControl, ShaderStage::TessellationEvaluation}) {
+        hull.shader.stage = stage;
+        shared.shader.stage = stage;
+        RecompileCacheKey::Build(hull, key);
+        const auto patchKey = key;
+        RecompileCacheKey::Build(shared, key);
+        require((key != patchKey) == (stage != ShaderStage::Local), "only the hull and domain cache keys may depend on BREAK_WAVE_AT_EOI, which decides whether their relative patch index can be rebuilt");
     }
     const std::array<std::uint32_t, 8> users{};
     request.context.waveSize = 32u;
@@ -1844,14 +1884,14 @@ void verifyPixelRequestSerialization() {
     minimal.context.pixel->rasterPrimitive = RasterPrimitive::Rectangle;
     minimal.context.pixel->layerExported = true;
     const auto encoded = serializer.Serialize(minimal);
-    require(requestPrefix(encoded, 8u) == "NVNQQRcAAAA=", "new requests did not use serialization version 23");
+    require(requestPrefix(encoded, 8u) == "NVNQQRgAAAA=", "new requests did not use serialization version 24");
     require(serializer.Deserialize(encoded).request.context.pixel->rasterPrimitive == RasterPrimitive::Rectangle, "the pixel primitive class did not round-trip");
     require(serializer.Deserialize(encoded).request.context.pixel->layerExported, "the pixel layer export did not round-trip");
     constexpr std::size_t mappingOffset = 8u + 37u + 18u + 163u;
     for (std::size_t bytes = 0; bytes < 22u; ++bytes) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(requestPrefix(encoded, mappingOffset + bytes))); }, "truncated data", "a truncated pixel mapping, packing, dual-source, alpha-to-coverage, stencil reference export flag, primitive class or layer export flag was accepted");
     }
-    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRgAAAA="}) {
+    for (const auto unsupported : {"NVNQQQAAAAA=", "NVNQQRkAAAA="}) {
         expectFailure([&] { static_cast<void>(serializer.Deserialize(unsupported)); }, "serialization version", "an unsupported request version was accepted");
     }
     static constexpr std::string_view version18Request{
