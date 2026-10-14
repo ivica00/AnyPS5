@@ -23,6 +23,30 @@ bool Driver::drawEntries() {
     return entries;
 }
 
+bool Driver::drawCacheBypassed() {
+    static const bool adaptive = std::getenv("APS5_NO_DRAW_CACHE_BYPASS") == nullptr;
+    if (!adaptive) return false;
+    auto left = drawCacheBypassLeft.load(std::memory_order_relaxed);
+    while (left != 0) {
+        if (drawCacheBypassLeft.compare_exchange_weak(left, left - 1, std::memory_order_relaxed)) {
+            drawCacheBypassedDraws.fetch_add(1, std::memory_order_relaxed);
+            return true;
+        }
+    }
+    return false;
+}
+
+void Driver::noteDrawCacheOutcome(bool hit) {
+    constexpr std::uint32_t Window = 2048;
+    constexpr std::uint32_t MinHitsPerWindow = Window / 20;
+    constexpr std::uint32_t BypassDraws = 16384;
+    if (hit) drawCacheProbeHits.fetch_add(1, std::memory_order_relaxed);
+    if (drawCacheProbeLookups.fetch_add(1, std::memory_order_relaxed) + 1 < Window) return;
+    const auto hits = drawCacheProbeHits.exchange(0, std::memory_order_relaxed);
+    drawCacheProbeLookups.store(0, std::memory_order_relaxed);
+    if (hits < MinHitsPerWindow) drawCacheBypassLeft.store(BypassDraws, std::memory_order_relaxed);
+}
+
 bool Driver::verifyDrawEntries() {
     static const bool verify = std::getenv("APS5_VERIFY_DRAW_ENTRIES") != nullptr;
     return verify;
