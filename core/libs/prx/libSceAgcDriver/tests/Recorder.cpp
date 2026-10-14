@@ -6438,6 +6438,19 @@ void Run(Context context) {
         AgcDriver::GuestMemory::ReadCommitted(address, std::as_writable_bytes(std::span(&pixel, 1)));
         Require(pixel == 0x7c7c7c7cu, "snapshot write-back lost GPU texels");
         Require(image->OriginalSnapshotBytes() == expectedBytes, "GPU-direct write-back allocated a CPU surface snapshot");
+        if (!watched) {
+            CommandBatch batch(context);
+            RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            VkClearColorValue clear{};
+            clear.uint32[0] = 0x9a9a9a9au;
+            const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(batch.Handle(), image->Image(), VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &range);
+            batch.SubmitAndWait();
+            image->MarkDirty();
+            image->WriteBack();
+            AgcDriver::GuestMemory::ReadCommitted(address, std::as_writable_bytes(std::span(&pixel, 1)));
+            Require(pixel == 0x9a9a9a9au, "repeated GPU-direct write-back lost GPU texels");
+        }
         if (watched) {
             AgcDriver::GuestMemory::Unwatch(address, SurfaceBytes);
             Require(!AgcDriver::GuestMemory::Watched(address, SurfaceBytes), "snapshot fixture is still write-watched");
@@ -6451,7 +6464,7 @@ void Run(Context context) {
         cpu.hostImportAlignment = 0;
         image = StorageTexture::Create(cpu, *context.detiler, Resource(address), 0);
         Require(image->OriginalSnapshotBytes() == SurfaceBytes, "CPU upload has no guest-byte snapshot");
-        const auto expectedPixel = watched ? 0x8d8d8d8du : 0x7c7c7c7cu;
+        const auto expectedPixel = watched ? 0x8d8d8d8du : 0x9a9a9a9au;
         Require(readPixel() == expectedPixel, "CPU upload returned incorrect GPU texels");
         {
             CommandBatch batch(context);
