@@ -29,7 +29,7 @@ extern "C" void __aps5_set_module_init_result_nid_no_patch(int);
 #endif
 
 #ifdef _WIN32
-extern "C" void ForgetUnwindImage_nid_no_patch(const void* base);
+extern "C" void ForgetUnloadedUnwindImages_nid_no_patch();
 #endif
 
 namespace {
@@ -47,7 +47,7 @@ struct Module {
         if (owned && native) {
 #ifdef _WIN32
             FreeLibrary(static_cast<HMODULE>(native));
-            ForgetUnwindImage_nid_no_patch(native);
+            ForgetUnloadedUnwindImages_nid_no_patch();
 #else
             ::dlclose(native);
 #endif
