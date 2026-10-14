@@ -239,7 +239,12 @@ struct VulkanDevice::State {
     VkDevice device = VK_NULL_HANDLE;
     VkPhysicalDevice physical = VK_NULL_HANDLE;
     VkQueue queue = VK_NULL_HANDLE;
+    std::uint32_t queueFamily = 0;
     VkCommandPool pool = VK_NULL_HANDLE;
+    VkQueue settleQueue = VK_NULL_HANDLE;
+    std::uint32_t settleFamily = 0;
+    VkCommandPool settlePool = VK_NULL_HANDLE;
+    std::mutex settleQueueMutex;
     void* window = nullptr;
     VkSurfaceKHR surface = VK_NULL_HANDLE;
     VkSwapchainKHR swapchain = VK_NULL_HANDLE;
@@ -728,6 +733,7 @@ struct VulkanDevice::State {
             if (pool != VK_NULL_HANDLE) {
                 destroyPool(device, pool, nullptr);
             }
+            if (settlePool != VK_NULL_HANDLE) destroyPool(device, settlePool, nullptr);
             destroyDevice(device, nullptr);
         }
         if (instance != VK_NULL_HANDLE) {
@@ -1358,13 +1364,48 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         state->spirvExtensions.push_back("SPV_EXT_mesh_shader");
     }
     const float priority = 1.0f;
-    VkDeviceQueueCreateInfo queueInfo{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
-    queueInfo.queueFamilyIndex = family;
-    queueInfo.queueCount = 1;
-    queueInfo.pQueuePriorities = &priority;
+    VkDeviceQueueCreateInfo queueInfos[2]{};
+    queueInfos[0] = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+    queueInfos[0].queueFamilyIndex = family;
+    queueInfos[0].queueCount = 1;
+    queueInfos[0].pQueuePriorities = &priority;
+#ifdef _WIN32
+    const float priorities[2]{1.0f, 1.0f};
+    bool settleQueue = false;
+    std::uint32_t settleFamily = family;
+    if (std::getenv("APS5_NO_WATCHED_PRIVATE_IMPORTS") == nullptr) {
+        std::uint32_t families = 0;
+        auto getFamilies = state->InstanceFunction<PFN_vkGetPhysicalDeviceQueueFamilyProperties>("vkGetPhysicalDeviceQueueFamilyProperties");
+        getFamilies(selected, &families, nullptr);
+        std::vector<VkQueueFamilyProperties> queues(families);
+        getFamilies(selected, &families, queues.data());
+        if (family < families && queues[family].queueCount >= 2 && std::getenv("APS5_SETTLE_OTHER_FAMILY") == nullptr) {
+            queueInfos[0].queueCount = 2;
+            queueInfos[0].pQueuePriorities = priorities;
+            settleQueue = true;
+        } else {
+            const auto copies = [&](std::uint32_t index) { return index != family && queues[index].queueCount != 0 && (queues[index].queueFlags & (VK_QUEUE_TRANSFER_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) != 0; };
+            for (std::uint32_t i = 0; i < families && !settleQueue; ++i) {
+                if (copies(i) && (queues[i].queueFlags & (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) == 0) settleFamily = i, settleQueue = true;
+            }
+            for (std::uint32_t i = 0; i < families && !settleQueue; ++i) {
+                if (copies(i)) settleFamily = i, settleQueue = true;
+            }
+        }
+    }
+#endif
     VkDeviceCreateInfo deviceInfo{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO};
     deviceInfo.queueCreateInfoCount = 1;
-    deviceInfo.pQueueCreateInfos = &queueInfo;
+    deviceInfo.pQueueCreateInfos = queueInfos;
+#ifdef _WIN32
+    if (settleQueue && settleFamily != family) {
+        queueInfos[1] = {VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+        queueInfos[1].queueFamilyIndex = settleFamily;
+        queueInfos[1].queueCount = 1;
+        queueInfos[1].pQueuePriorities = &priority;
+        deviceInfo.queueCreateInfoCount = 2;
+    }
+#endif
     VkPhysicalDeviceFeatures available{};
     state->InstanceFunction<PFN_vkGetPhysicalDeviceFeatures>("vkGetPhysicalDeviceFeatures")(selected, &available);
     require(available.vertexPipelineStoresAndAtomics && available.fragmentStoresAndAtomics, "graphics shader buffer writes and atomics are unavailable");
@@ -1641,11 +1682,23 @@ VulkanDevice::VulkanDevice(const PresentationWindow* window, bool compileOnly) :
         }
     }
     state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, family, 0, &state->queue);
+    state->queueFamily = family;
+#ifdef _WIN32
+    if (settleQueue) {
+        state->settleFamily = settleFamily;
+        state->DeviceFunction<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(state->device, settleFamily, settleFamily == family ? 1 : 0, &state->settleQueue);
+    }
+#endif
     APS5_LOG_OUT("Vulkan device ready device=%p queue=%p family=%u", reinterpret_cast<void*>(state->device), reinterpret_cast<void*>(state->queue), family);
     VkCommandPoolCreateInfo poolInfo{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
     poolInfo.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
     poolInfo.queueFamilyIndex = family;
     check(state->DeviceFunction<PFN_vkCreateCommandPool>("vkCreateCommandPool")(state->device, &poolInfo, nullptr, &state->pool), "vkCreateCommandPool");
+    if (state->settleQueue != VK_NULL_HANDLE) {
+        VkCommandPoolCreateInfo settlePoolInfo = poolInfo;
+        settlePoolInfo.queueFamilyIndex = state->settleFamily;
+        check(state->DeviceFunction<PFN_vkCreateCommandPool>("vkCreateCommandPool")(state->device, &settlePoolInfo, nullptr, &state->settlePool), "vkCreateCommandPool settle");
+    }
     static const bool procTable = std::getenv("APS5_NO_PROC_TABLE") == nullptr;
     if (procTable) {
         Graphics::FillDeviceFunctions(graphicsContext(), state->deviceFunctions);
@@ -3157,6 +3210,11 @@ Graphics::Context VulkanDevice::buildContext() const {
     };
     context.pipelineCacheSynchronization = state->pipelineCache ? &state->pipelineCache->Synchronization() : nullptr;
     context.dmaBufImport = state->dmaBufImport;
+    context.queueFamily = state->queueFamily;
+    context.settleQueue = state->settlePool != VK_NULL_HANDLE ? state->settleQueue : VK_NULL_HANDLE;
+    context.settlePool = state->settlePool;
+    context.settleFamily = state->settleFamily;
+    context.settleQueueMutex = &state->settleQueueMutex;
     context.recorder = state->recorder.get();
     context.descriptorCache = state->descriptorCache.get();
     context.samplerCache = state->samplerCache.get();
