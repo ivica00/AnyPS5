@@ -1,3 +1,4 @@
+#include <filesystem>
 #include "prx/libSceAgcDriver/Execution/include/ProfileOutput.hpp"
 #include "prx/libSceAgcDriver/Execution/include/CaptureTrace.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Texture.hpp"
@@ -4464,6 +4465,41 @@ void StorageTexture::writeBackLayers(const std::vector<bool>& layers) {
     }
     if (const auto* import = HostImportFor(context, descriptor.baseAddress, static_cast<std::size_t>(guestBytes))) {
         Require(!unsavedOutsideWatch, "storing storage image results pending over memory outside the write watch without the guest bytes saved before them is not implemented");
+        // Optional readback on the normal imported-memory path. Queue the existing
+        // recorder first; leave the surface in GENERAL and preserve its write-back.
+        static int importedDumps = 0;
+        if (StorageDumpSelects(descriptor) && descriptor.mipCount == 1 && importedDumps < 8 && (std::getenv("APS5_LUT_CAPTURE_GATE") == nullptr || std::filesystem::exists(std::getenv("APS5_LUT_CAPTURE_GATE")))) {
+            Buffer dump(context, static_cast<std::size_t>(sliceLinearBytes * arrayLayers), VK_BUFFER_USAGE_TRANSFER_DST_BIT);
+            CommandBatch snapshot(context);
+            const auto commands = snapshot.Handle();
+            VkImageMemoryBarrier barrier{VK_STRUCTURE_TYPE_IMAGE_MEMORY_BARRIER};
+            barrier.srcAccessMask = VK_ACCESS_MEMORY_WRITE_BIT;
+            barrier.dstAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.oldLayout = VK_IMAGE_LAYOUT_GENERAL;
+            barrier.newLayout = VK_IMAGE_LAYOUT_GENERAL;
+            barrier.srcQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.dstQueueFamilyIndex = VK_QUEUE_FAMILY_IGNORED;
+            barrier.image = image;
+            barrier.subresourceRange = {VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, geometry.imageLayers};
+            context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+            const auto regions = CopyRegions();
+            context.Function<PFN_vkCmdCopyImageToBuffer>("vkCmdCopyImageToBuffer")(commands, image, VK_IMAGE_LAYOUT_GENERAL, dump.Handle(), static_cast<std::uint32_t>(regions.size()), regions.data());
+            RecordMemoryBarrier(context, commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_HOST_BIT, VK_ACCESS_TRANSFER_WRITE_BIT, VK_ACCESS_HOST_READ_BIT);
+            barrier.srcAccessMask = VK_ACCESS_TRANSFER_READ_BIT;
+            barrier.dstAccessMask = VK_ACCESS_MEMORY_READ_BIT | VK_ACCESS_MEMORY_WRITE_BIT;
+            context.Function<PFN_vkCmdPipelineBarrier>("vkCmdPipelineBarrier")(commands, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, 0, 0, nullptr, 0, nullptr, 1, &barrier);
+            snapshot.SubmitAndWait();
+            dump.Invalidate();
+            char name[80];
+            std::snprintf(name, sizeof(name), "storage_gpu_%llx_%d.raw", static_cast<unsigned long long>(descriptor.baseAddress), importedDumps++);
+            if (std::FILE* file = std::fopen(name, "wb")) {
+                const std::uint32_t header[4] = {mips[0].pitchBytes / static_cast<std::uint32_t>(elementBytes), mips[0].height, arrayLayers, static_cast<std::uint32_t>(storageFormat)};
+                std::fwrite(header, sizeof(header), 1, file);
+                std::fwrite(dump.Bytes().data(), 1, dump.Bytes().size(), file);
+                std::fclose(file);
+                std::fprintf(stderr, "[storage-gpu-dump] %s %ux%ux%u format %u bytes %zu\n", name, descriptor.width, descriptor.height, arrayLayers, descriptor.format, dump.Bytes().size());
+            }
+        }
         if (blockUnits) {
             // The kept blocks alone pass through the retiler (windows of their slices).
             shadowImport = import;
