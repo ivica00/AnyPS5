@@ -3,6 +3,8 @@
 #include "SceTypes.hpp"
 #include "prx/libc/include/General.hpp"
 #include <cstring>
+#include <cstdio>
+#include <cstdlib>
 #include <filesystem>
 #include <fstream>
 #include <iterator>
@@ -90,6 +92,18 @@ static bool IsKnownChunk(uint16_t id) {
     const auto& chunks = Chunks();
     if (chunks.defined) return chunks.ids.contains(id);
     if (chunks.scenario || id == 0) return true;
+    static const bool assumeInstalled = [] {
+        const char* value = std::getenv("APS5_PLAYGO_ASSUME_INSTALLED");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    if (assumeInstalled) {
+        static const bool reported = [] {
+            std::fprintf(stderr, "[playgo] chunk metadata is absent; APS5_PLAYGO_ASSUME_INSTALLED=1 treats requested chunks as locally installed\n");
+            return true;
+        }();
+        static_cast<void>(reported);
+        return true;
+    }
     throw std::runtime_error("scePlayGo: sce_sys/playgo-chunk.dat and sce_sys/playgo-scenario.json are missing, so chunk ID " + std::to_string(id) + " cannot be checked");
 }
 

@@ -20,6 +20,7 @@ multisample depth support. Older local ports of those features must not overwrit
 | Open render-pass target proofs | On | `APS5_NO_TARGET_PROOF=1` forces refreshes |
 | GPU-only allocation imports | Off | `APS5_IMPORT_GPU_ONLY=1` includes GPU-accessible registrations |
 | Cross-draw input snapshot reuse | Off | `APS5_REUSE_DRAW_SNAPSHOTS=1` is an experimental opt-in |
+| PlayGo without chunk metadata | Strict validation | `APS5_PLAYGO_ASSUME_INSTALLED=1` treats requested chunks as locally installed when the dump has no chunk table or scenario; an existing table still validates IDs |
 
 Shader-memory capture uses pooled pages and compact word masks. Draw variants record the
 user-data registers they actually consume, allowing shape and stage reuse. Target proofs

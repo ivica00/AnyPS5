@@ -173,16 +173,25 @@ static std::string ChunkTableFile() {
 }
 
 int main(int argc, char** argv) {
+#ifdef _WIN32
+    _putenv_s("APS5_PLAYGO_ASSUME_INSTALLED", argc == 3 && std::string_view(argv[1]).starts_with("--assume-installed") ? "1" : "");
+#else
+    if (argc == 3 && std::string_view(argv[1]).starts_with("--assume-installed")) setenv("APS5_PLAYGO_ASSUME_INSTALLED", "1", 1);
+    else unsetenv("APS5_PLAYGO_ASSUME_INSTALLED");
+#endif
     if (argc == 3) {
         const std::string_view mode = argv[1];
         if (mode == "--no-file") return CheckNoPlayGoFile(argv[2]);
-        if (mode == "--package-chunk-table" || mode == "--scenario-with-chunk-table") return CheckPackageChunkTable(argv[2]);
+        if (mode == "--package-chunk-table" || mode == "--scenario-with-chunk-table" || mode == "--assume-installed-table") return CheckPackageChunkTable(argv[2]);
         if (mode == "--scenario-only") return CheckScenarioWithoutChunkTable(argv[2]);
+        if (mode == "--assume-installed") return CheckScenarioWithoutChunkTable(argv[2]);
         if (mode == "--ficm-only") return CheckRejectedLayout(argv[2], "playgo-ficm.dat");
         if (mode == "--hash-table-only") return CheckRejectedLayout(argv[2], "playgo-hash-table.dat");
         if (mode == "--invalid-chunk-table") return CheckRejectedLayout(argv[2], "playgo-chunk.dat");
     }
     RunLayout(argv[0], "--no-file", {});
+    RunLayout(argv[0], "--assume-installed", {});
+    RunLayout(argv[0], "--assume-installed-table", {{"playgo-chunk.dat", ChunkTableFile()}});
     RunLayout(argv[0], "--package-chunk-table", {{"playgo-chunk.dat", ChunkTableFile()}});
     RunLayout(argv[0], "--scenario-with-chunk-table", {{"playgo-chunk.dat", ChunkTableFile()}, {"playgo-scenario.json", "{}"}});
     RunLayout(argv[0], "--scenario-only", {{"playgo-scenario.json", "{}"}});
