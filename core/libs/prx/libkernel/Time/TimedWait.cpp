@@ -253,6 +253,18 @@ void Condition::NotifyAll() {
     }
 }
 
+DeliveryDeferral::DeliveryDeferral() {
+    WaitState().bound->fetch_add(1, std::memory_order_seq_cst);
+}
+
+DeliveryDeferral::~DeliveryDeferral() {
+    WaitState().bound->fetch_sub(1, std::memory_order_seq_cst);
+}
+
+void DeliverDeferred() {
+    DrainApcs();
+}
+
 namespace {
 
 struct alignas(64) ParkBucket {
@@ -267,11 +279,6 @@ ParkBucket parkBuckets[256];
 ParkBucket& ParkBucketFor(const void* key) {
     return parkBuckets[(reinterpret_cast<std::uintptr_t>(key) * 0x9E3779B97F4A7C15ULL) >> 56];
 }
-
-struct DeliveryDeferral {
-    DeliveryDeferral() { WaitState().bound->fetch_add(1, std::memory_order_seq_cst); }
-    ~DeliveryDeferral() { WaitState().bound->fetch_sub(1, std::memory_order_seq_cst); }
-};
 
 void UnlinkParked(ParkBucket& bucket, Waiter* waiter) {
     if (waiter->previous) waiter->previous->next = waiter->next;

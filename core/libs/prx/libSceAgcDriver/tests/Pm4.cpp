@@ -168,6 +168,9 @@ void testRegisterFile() {
 
 void testContextAndBases() {
     AgcDriver::QueueState state;
+    for (const auto offset : {0x10bu, 0x10cu, 0x10du}) execute(state, makePacket(0x69, {offset, 0xffffffffu}));
+    execute(state, makePacket(0x12, {0}));
+    for (const auto offset : {0x10bu, 0x10cu, 0x10du}) check(state.context.at(offset) == 0, "CLEAR_STATE did not restore stencil defaults");
     execute(state, makePacket(0x69, {0x10, 17}));
     execute(state, makePacket(0x76, {0x20c, 2}));
     execute(state, makePacket(0x10, {3, 0}, 0x68));
@@ -206,7 +209,8 @@ void testContextAndBases() {
     expectFailure([] { static_cast<void>(AgcDriver::Pm4::PartialGroupThreads({0x10002, 1, 1}, {0x0001ffff, 0x00010001, 0x00010001})); }, "exceeds 32 bits");
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x15, {1, 1, 1, 0x2063}, 2), 0); }, "dispatch modifiers");
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x15, {1, 1, 1, 0x41}, 4), 0); }, "header flags");
-    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x15, {1, 1, 1, 0x49}), 0); }, "dispatch modifiers");
+    AgcDriver::Pm4::Validate(makePacket(0x15, {1, 1, 1, 0x49}), 0);
+    expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x15, {1, 1, 1, 0x51}), 0); }, "dispatch modifiers");
     execute(state, makePacket(0x13, {32}));
     execute(state, makePacket(0x26, {0x1000, 1}));
     execute(state, makePacket(0x2a, {1}));
@@ -503,6 +507,29 @@ void testCopies() {
     const auto clockStore =AgcDriver::Pm4::ResolveStore(clockCopy(&clock[0]), state, 64);
     check(clockStore.has_value() && clockStore->Bytes().size() == 8, "GPU clock COPY_DATA did not resolve as an 8-byte store");
     expectFailure([&] { AgcDriver::Pm4::Validate(makePacket(0x40, {0x1020a, 0, 0, low(&clock[0]), high(&clock[0])}), 0); }, "reference-clock");
+    alignas(8) std::array<std::uint32_t, 2> fromRegister{0xdeadbeef, 0xdeadbeef};
+    const auto registerCopy = [&](std::uint32_t control, std::uint32_t offset) { return makePacket(0x40, {control, offset, 0, low(fromRegister.data()), high(fromRegister.data())}); };
+    execute(state, makePacket(0x76, {0x20c, 0x02754800, 0x2}));
+    execute(state, registerCopy(0x00100200, 0x2e0c));
+    check(fromRegister[0] == 0x02754800 && fromRegister[1] == 0xdeadbeef, "COPY_DATA from a shader register failed");
+    execute(state, registerCopy(0x00110200, 0x2e0c));
+    check(fromRegister[0] == 0x02754800 && fromRegister[1] == 0x2, "64-bit COPY_DATA from two shader registers failed");
+    execute(state, makePacket(0x69, {0x10, 0xabc}));
+    execute(state, registerCopy(0x00100200, 0xa010));
+    check(fromRegister[0] == 0xabc, "COPY_DATA from a context register failed");
+    check(!AgcDriver::Pm4::ResolveStore(registerCopy(0x00100200, 0x2e0c), state, 64).has_value(), "COPY_DATA from a register resolved before its turn");
+    AgcDriver::Pm4::NoteDispatchRegisters(makePacket(0x15, {4, 2, 1, 0x8041}), state);
+    execute(state, registerCopy(0x00100200, 0x2e00));
+    check(fromRegister[0] == 0x8041, "COPY_DATA did not read the last dispatch initiator");
+    execute(state, registerCopy(0x00100200, 0x2e01));
+    check(fromRegister[0] == 4, "COPY_DATA did not read the last direct dispatch's group count");
+    AgcDriver::Pm4::NoteDispatchRegisters(makePacket(0x16, {0, 0x8001}), state);
+    execute(state, registerCopy(0x00100200, 0x2e00));
+    check(fromRegister[0] == 0x8001, "COPY_DATA did not read the last indirect dispatch initiator");
+    expectFailure([&] { execute(state, registerCopy(0x00100200, 0x2e01)); }, "has no known value");
+    expectFailure([&] { execute(state, registerCopy(0x00100200, 0x2e3f)); }, "has no known value");
+    expectFailure([&] { AgcDriver::Pm4::Validate(registerCopy(0x00100200, 0x1000), 0); }, "outside the shader, context and user config");
+    expectFailure([&] { AgcDriver::Pm4::Validate(registerCopy(0x00110200, 0x2fff), 0); }, "outside the shader, context and user config");
     execute(state, makePacket(0x50, {0x60000000, low(source.data()), high(source.data()), low(destination.data()), high(destination.data()), 16}));
     check(source == destination, "DMA_DATA copy failed");
     execute(state, makePacket(0x50, {0x40000000, 0x44332211, 0, low(destination.data()), high(destination.data()), 6}));
@@ -548,6 +575,21 @@ void testCopies() {
     } catch (...) { VirtualFree(memory, 0, MEM_RELEASE); throw; }
     check(VirtualFree(memory, 0, MEM_RELEASE) != 0, "VirtualFree failed");
 #endif
+}
+
+void testTraceRegisterWrites() {
+    AgcDriver::QueueState state;
+    const auto repeated = makePacket(0x37, {0x06010000u, 0xc343u, 0u, 0x1234u, 0x5678u});
+    check(!AgcDriver::Pm4::DecodeLabelWrite(repeated), "trace register payload was decoded as a guest memory label");
+    execute(state, repeated);
+    check(state.userConfig.at(0x343u) == 0x5678u, "one-address trace write did not retain the last register value");
+    execute(state, makePacket(0x37, {0x06000000u, 0xc340u, 0u, 1u, 2u, 3u}));
+    check(state.userConfig.at(0x340u) == 1u && state.userConfig.at(0x341u) == 2u && state.userConfig.at(0x342u) == 3u, "sequential trace write did not advance the register address");
+    execute(state, makePacket(0x37, {0x06010000u, 0xc347u, 0u, 4u, 5u}));
+    check(state.userConfig.at(0x347u) == 5u, "one-address trace write crossed the register range");
+    for (const auto& invalid : {makePacket(0x37, {0x06000000u, 0xc347u, 0u, 1u, 2u}), makePacket(0x37, {0x06010000u, 0xc348u, 0u, 1u}), makePacket(0x37, {0x06010000u, 0xc343u, 1u, 1u})}) {
+        expectFailure([&] { execute(state, invalid); }, "register destination outside");
+    }
 }
 
 void testMemoryCopyDecode() {
@@ -1238,6 +1280,7 @@ int main(int argc, char** argv) {
         testIndirectDraw();
         testIndexAttributesIndirect();
         testMemory();
+        testTraceRegisterWrites();
         testCopies();
         testMemoryCopyDecode();
         testMemorySynchronization();
