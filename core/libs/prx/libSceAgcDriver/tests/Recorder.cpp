@@ -1716,10 +1716,12 @@ void secondMappingImportTests(const Device& device) {
     Require(sceKernelAllocateDirectMemory(0, 0x7fffffffffll, bytes, bytes, 0, &release.physical) == 0, "allocate the second mapping test backing");
     Require(sceKernelMapDirectMemory(&release.mapping, bytes, 0x33, 0, release.physical, bytes) == 0, "map the second mapping test backing");
     const auto address = reinterpret_cast<std::uint64_t>(release.mapping);
-    if (HostImportFor(context, address, bytes) == nullptr) {
+    const auto* imported = HostImportFor(context, address, bytes);
+    if (imported == nullptr) {
         std::cout << "host import of singly mapped direct memory refused: imports after a second mapping not tested\n";
         return;
     }
+    Require(imported->alias != nullptr && !imported->unwatched, "singly mapped direct memory was imported without guest write tracking");
     const auto first = HostImportSerial(context, address, bytes, true);
     Require(first != 0 && HostImportSerial(context, address, bytes, true) == first, "singly mapped direct memory lost its import");
     Require(sceKernelMapDirectMemory(&release.alias, page, 0x33, 0, release.physical, page) == 0, "map the first page a second time");
@@ -3088,6 +3090,73 @@ void drawInputReuseTests(const Device& device, Recorder& recorder) {
     recorder.Sync();
 }
 
+void unwatchedDrawInputTests(const Context& context) {
+    auto& recorder = *context.recorder;
+    constexpr std::size_t bytes = 65536;
+#ifdef _WIN32
+    void* block = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void* block = std::aligned_alloc(65536, bytes);
+#endif
+    Require(block != nullptr, "cannot allocate the unwatched draw input block");
+    struct Release {
+        void* block;
+        ~Release() {
+#ifdef _WIN32
+            VirtualFree(block, 0, MEM_RELEASE);
+#else
+            std::free(block);
+#endif
+        }
+    } release{block};
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    if (AgcDriver::GuestMemory::Watched(address, bytes)) {
+        std::cout << "the unwatched block is watched: in-place draw inputs not tested\n";
+        return;
+    }
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true, true);
+    }
+    struct Unregister {
+        const Context& context;
+        void* block;
+        ~Unregister() {
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(block);
+            }
+            HostImportFor(context, reinterpret_cast<std::uint64_t>(block), bytes);
+        }
+    } unregister{context, block};
+    if (HostImportFor(context, address, bytes) == nullptr) {
+        std::cout << "host import of the unwatched block refused: in-place draw inputs not tested\n";
+        return;
+    }
+    recorder.Sync();
+    const auto vertices = address + 4096;
+    const auto* import = InPlaceDrawInput(context, vertices, 256, 4);
+    Require(import != nullptr && import->base <= vertices && vertices + 256 <= import->base + import->bytes, "an imported draw input was not bound in place");
+    const auto read = recorder.DescribePendingRead(vertices, 256);
+    Require(read.has_value() && read->kind == Recorder::ReadKind::DrawInput && read->open, "an in-place draw input's read was not noted on the open batch");
+    Require(InPlaceDrawInput(context, vertices + 2, 256, 4) == nullptr, "a draw input misaligned for its format was bound in place");
+    Require(InPlaceDrawInput(context, vertices + 2, 256, 2) != nullptr, "an aligned 16-bit draw input was not bound in place");
+    recorder.NotePendingWrite(address + 8192, 16);
+    Require(InPlaceDrawInput(context, address + 8192, 256, 4) != nullptr && !recorder.PendingWriteOverlaps(address + 8192, 256), "a draw input under a pending GPU write was bound before the write completed");
+    const std::array<std::byte, 4> label{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
+    recorder.RecordStore(import->buffer, address + 12288 - import->base, label, address + 12288);
+    Require(recorder.QueuedStoreOverlaps(address + 12288, 4), "the label store was not queued");
+    Require(InPlaceDrawInput(context, address + 12288, 256, 4) == nullptr, "a draw input under a queued label store was bound in place");
+    Require(InPlaceDrawInput(context, address + 16384, 256, 4) != nullptr, "a queued label store refused a disjoint draw input");
+    alignas(64) static std::array<std::byte, 256> unregistered{};
+    Require(InPlaceDrawInput(context, reinterpret_cast<std::uint64_t>(unregistered.data()), unregistered.size(), 4) == nullptr, "memory without a host import was bound in place");
+    auto unrecorded = context;
+    unrecorded.recorder = nullptr;
+    Require(InPlaceDrawInput(unrecorded, vertices, 256, 4) == nullptr, "a draw without a recorder bound its input in place");
+    recorder.Sync();
+    Require(!recorder.PendingReadOverlaps(vertices, 256), "an in-place draw input's read outlived its batch");
+}
+
 void drawInputInPlaceTests(const Device& device, Recorder& recorder) {
     auto context = device.GetContext();
     constexpr std::size_t bytes = 65536;
@@ -3122,27 +3191,11 @@ void drawInputInPlaceTests(const Device& device, Recorder& recorder) {
     }
     context.recorder = &recorder;
     recorder.Sync();
-    const auto vertices = address + 4096;
-    const auto* import = InPlaceDrawInput(context, vertices, 256, 4);
-    Require(import != nullptr && import->base <= vertices && vertices + 256 <= import->base + import->bytes, "an imported draw input was not bound in place");
-    const auto read = recorder.DescribePendingRead(vertices, 256);
-    Require(read.has_value() && read->kind == Recorder::ReadKind::DrawInput && read->open, "an in-place draw input's read was not noted on the open batch");
-    Require(InPlaceDrawInput(context, vertices + 2, 256, 4) == nullptr, "a draw input misaligned for its format was bound in place");
-    Require(InPlaceDrawInput(context, vertices + 2, 256, 2) != nullptr, "an aligned 16-bit draw input was not bound in place");
+    Require(!AgcDriver::GuestMemory::Watched(address, bytes) || InPlaceDrawInput(context, address + 4096, 256, 4) == nullptr, "a write-watched draw input was bound in place instead of from a snapshot");
     recorder.NotePendingWrite(address + 8192, 16);
-    Require(InPlaceDrawInput(context, address + 8192, 256, 4) != nullptr && !recorder.PendingWriteOverlaps(address + 8192, 256), "a draw input under a pending GPU write was bound before the write completed");
-    const std::array<std::byte, 4> label{std::byte{1}, std::byte{2}, std::byte{3}, std::byte{4}};
-    recorder.RecordStore(import->buffer, address + 12288 - import->base, label, address + 12288);
-    Require(recorder.QueuedStoreOverlaps(address + 12288, 4), "the label store was not queued");
-    Require(InPlaceDrawInput(context, address + 12288, 256, 4) == nullptr, "a draw input under a queued label store was bound in place");
-    Require(InPlaceDrawInput(context, address + 16384, 256, 4) != nullptr, "a queued label store refused a disjoint draw input");
-    alignas(64) static std::array<std::byte, 256> unregistered{};
-    Require(InPlaceDrawInput(context, reinterpret_cast<std::uint64_t>(unregistered.data()), unregistered.size(), 4) == nullptr, "memory without a host import was bound in place");
-    auto unrecorded = context;
-    unrecorded.recorder = nullptr;
-    Require(InPlaceDrawInput(unrecorded, vertices, 256, 4) == nullptr, "a draw without a recorder bound its input in place");
+    Require(!AgcDriver::GuestMemory::Watched(address, bytes) || InPlaceDrawInput(context, address + 8192, 256, 4) != nullptr, "a write-watched draw input under a pending GPU write was not bound in place");
     recorder.Sync();
-    Require(!recorder.PendingReadOverlaps(vertices, 256), "an in-place draw input's read outlived its batch");
+    unwatchedDrawInputTests(context);
     if (!AgcDriver::GuestMemory::Watched(address, bytes)) {
         std::cout << "host imports are compared, not watched: kept highest indices not tested\n";
         return;
@@ -7905,6 +7958,19 @@ void Run(Context context) {
         AgcDriver::GuestMemory::ReadCommitted(address, std::as_writable_bytes(std::span(&pixel, 1)));
         Require(pixel == 0x7c7c7c7cu, "snapshot write-back lost GPU texels");
         Require(image->OriginalSnapshotBytes() == expectedBytes, "GPU-direct write-back allocated a CPU surface snapshot");
+        if (!watched) {
+            CommandBatch batch(context);
+            RecordMemoryBarrier(context, batch.Handle(), VK_PIPELINE_STAGE_ALL_COMMANDS_BIT, VK_PIPELINE_STAGE_TRANSFER_BIT, VK_ACCESS_MEMORY_WRITE_BIT, VK_ACCESS_TRANSFER_WRITE_BIT);
+            VkClearColorValue clear{};
+            clear.uint32[0] = 0x9a9a9a9au;
+            const VkImageSubresourceRange range{VK_IMAGE_ASPECT_COLOR_BIT, 0, 1, 0, 1};
+            context.Function<PFN_vkCmdClearColorImage>("vkCmdClearColorImage")(batch.Handle(), image->Image(), VK_IMAGE_LAYOUT_GENERAL, &clear, 1, &range);
+            batch.SubmitAndWait();
+            image->MarkDirty();
+            image->WriteBack();
+            AgcDriver::GuestMemory::ReadCommitted(address, std::as_writable_bytes(std::span(&pixel, 1)));
+            Require(pixel == 0x9a9a9a9au, "repeated GPU-direct write-back lost GPU texels");
+        }
         if (watched) {
             AgcDriver::GuestMemory::Unwatch(address, SurfaceBytes);
             Require(!AgcDriver::GuestMemory::Watched(address, SurfaceBytes), "snapshot fixture is still write-watched");
@@ -7918,7 +7984,7 @@ void Run(Context context) {
         cpu.hostImportAlignment = 0;
         image = StorageTexture::Create(cpu, *context.detiler, Resource(address), 0);
         Require(image->OriginalSnapshotBytes() == SurfaceBytes, "CPU upload has no guest-byte snapshot");
-        const auto expectedPixel = watched ? 0x8d8d8d8du : 0x7c7c7c7cu;
+        const auto expectedPixel = watched ? 0x8d8d8d8du : 0x9a9a9a9au;
         Require(readPixel() == expectedPixel, "CPU upload returned incorrect GPU texels");
         {
             CommandBatch batch(context);

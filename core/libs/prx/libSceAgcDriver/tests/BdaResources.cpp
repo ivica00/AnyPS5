@@ -522,13 +522,19 @@ void importJoinTests(const Context& context) {
     auto* heap = guest + 3 * large + 2 * piece;
     change(heap, piece, true);
     change(heap + piece, piece, true);
-    Require(bind(reinterpret_cast<std::uintptr_t>(heap + piece) - 16).second != 0 && HostImportFor(importing, reinterpret_cast<std::uintptr_t>(heap + piece) - 16, 32) == nullptr, "two pieces no larger than the import window were joined");
     const auto heapBase = reinterpret_cast<std::uintptr_t>(heap);
+    const auto [intoBuffer, intoCopied] = bind(heapBase, piece + 16);
+    const auto* into = HostImportFor(importing, heapBase, piece + 16);
+    Require(into != nullptr && into->base == heapBase && into->bytes == 2 * piece && intoBuffer == into->buffer && intoCopied == 0, "a buffer bound from one piece into the next, both no larger than the import window, was not imported over both pieces");
+    const auto [acrossBuffer, acrossCopied] = bind(heapBase + piece - 16);
+    Require(acrossBuffer == into->buffer && acrossCopied == 0, "a later bind across the joined pieces did not use their import");
     const auto [piecesBuffer, piecesCopied] = bind(heapBase, 2 * piece);
     const auto* pieces = HostImportFor(importing, heapBase, 2 * piece);
     Require(pieces != nullptr && pieces->base == heapBase && pieces->bytes == 2 * piece && piecesBuffer == pieces->buffer && piecesCopied == 0, "a buffer bound exactly over two pieces no larger than the import window was not imported as one");
     change(heap + 2 * piece, piece, true);
-    static_cast<void>(bind(heapBase + 2 * piece - 16));
+    const auto [extendedBuffer, extendedCopied] = bind(heapBase + 2 * piece - 16);
+    const auto* extended = HostImportFor(importing, heapBase + 2 * piece - 16, 32);
+    Require(extended != nullptr && extended->base == heapBase && extended->bytes == 3 * piece && extendedBuffer == extended->buffer && extendedCopied == 0, "a bind into a piece registered after the joined pieces did not grow their import: base delta=" + (extended ? std::to_string(extended->base - heapBase) : "missing") + " bytes=" + (extended ? std::to_string(extended->bytes) : "0") + " copied=" + std::to_string(extendedCopied) + " same=" + std::to_string(extended && extendedBuffer == extended->buffer));
     const auto* kept = HostImportFor(importing, first, 16);
     Require(kept != nullptr && kept->buffer == joinedBuffer && kept->bytes == 2 * large, "a registry change elsewhere re-imported the joined ranges");
     change(guest + 2 * large, large, true);
@@ -718,6 +724,7 @@ void spaceReadAcrossImportsTests(const Context& context, const BdaTestAccess& ac
         GuestAllocations::GuestAllocationsEnd_nid_postfix(mutation);
     };
     for (std::size_t index = 0; index < 3; ++index) change(guest + index * piece, true);
+    VkBuffer joinedBuffer = VK_NULL_HANDLE;
     for (int build = 0; build < 2; ++build) {
         const auto before = AddressSpaceCounters();
         GuestBufferMemory leased(importing);
@@ -733,7 +740,14 @@ void spaceReadAcrossImportsTests(const Context& context, const BdaTestAccess& ac
         Require(std::any_of(ranges.begin(), ranges.end(), [&](const auto& range) { return range.begin <= first && boundary <= range.end; }) && std::any_of(ranges.begin(), ranges.end(), [&](const auto& range) { return range.begin <= boundary && boundary + piece <= range.end; }), "an import is missing from the BDA table of a build with a read-only V# across it");
         leased.WriteBack();
         const auto after = AddressSpaceCounters();
-        if (after.enabled && build == 1) Require(after.hits == before.hits + 1 && after.dissolvedOverlap == before.dissolvedOverlap, "a read-only V# across two imports dissolved the cached address space");
+        const auto* joined = HostImportFor(importing, boundary - 256, 512);
+        if (joined != nullptr) {
+            Require(view.buffer == joined->buffer, "a joined read-only V# used a copied buffer");
+            Require(build == 0 || joinedBuffer == joined->buffer, "a repeated cross-import read replaced its joined import");
+            joinedBuffer = joined->buffer;
+        } else if (after.enabled && build == 1) {
+            Require(after.hits == before.hits + 1 && after.dissolvedOverlap == before.dissolvedOverlap, "a read-only V# across two imports dissolved the cached address space");
+        }
     }
     for (std::size_t index = 0; index < 3; ++index) change(guest + index * piece, false);
     SetHostImportWindow(0);

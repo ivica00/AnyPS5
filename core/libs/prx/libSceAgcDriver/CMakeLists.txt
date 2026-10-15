@@ -151,6 +151,7 @@ set(agcDriverSources
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Driver/Draw/DrawCapture.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Driver/Draw/DrawDecode.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Driver/Draw/DrawLookup.cpp
+        ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Driver/Draw/DrawPipeline.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Driver/Draw/DrawPrecheck.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Driver/Draw/DrawRegisterKey.cpp
         ${CMAKE_CURRENT_SOURCE_DIR}/Execution/src/Driver/Draw/DrawTiming.cpp
@@ -2308,4 +2309,18 @@ if(BUILD_TESTING)
         set_tests_properties(agc_constant_phi PROPERTIES ENVIRONMENT_MODIFICATION
             "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
     endif()
+endif()
+
+if(BUILD_TESTING)
+    foreach(optimizationTest IN ITEMS PipelinedDma DrawWriteRanges)
+        add_test_executable(agc_optimization_${optimizationTest}_tests tests/execution/${optimizationTest}.cpp)
+        target_include_directories(agc_optimization_${optimizationTest}_tests PRIVATE ${LIBS_INCLUDE_DIR} ${CMAKE_SOURCE_DIR}/core/shader/recompiler ${ANYPS5_VULKAN_HEADERS_INCLUDE_DIR})
+        target_link_libraries(agc_optimization_${optimizationTest}_tests PRIVATE libSceAgcDriver libc libkernel)
+        configure_windows_unwind(agc_optimization_${optimizationTest}_tests)
+        add_test(NAME agc_optimization_${optimizationTest} COMMAND agc_optimization_${optimizationTest}_tests)
+        set_tests_properties(agc_optimization_${optimizationTest} PROPERTIES TIMEOUT 30)
+        if(WIN32)
+            set_tests_properties(agc_optimization_${optimizationTest} PROPERTIES ENVIRONMENT_MODIFICATION "PATH=path_list_prepend:$<TARGET_FILE_DIR:libc>")
+        endif()
+    endforeach()
 endif()

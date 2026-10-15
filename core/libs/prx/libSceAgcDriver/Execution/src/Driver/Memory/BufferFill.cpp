@@ -1,3 +1,4 @@
+#include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Memory/BufferFill.hpp"
 #include "ThreadOwned.hpp"
@@ -196,6 +197,9 @@ bool Driver::fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<cons
     std::uint64_t base;
     std::size_t bytes;
     std::array<std::uint32_t, 4> pattern;
+    if (DrawPipeline::Active() && !dwordFill && DrawPipeline::Queue0().Busy()) {
+        DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Packet);
+    }
     std::unique_lock inputLock(GuestMemory::GpuMutex(), std::defer_lock);
     if (dwordFill) {
         base = dwordFill->base;
@@ -252,7 +256,13 @@ bool Driver::fillBuffer(QueueState& queue, std::uint32_t queueId, std::span<cons
             pattern = {userData[4], userData[5], userData[6], userData[7]};
         }
     }
-    storeBufferFill(queueId, base, bytes, pattern, localDevice, memoryFill.has_value(), true);
+    if (DrawPipeline::Active() && !inputLock.owns_lock()) {
+        DrawPipeline::Queue0().Enqueue([this, queueId, base, bytes, pattern, localDevice, memoryValueFill = memoryFill.has_value()] {
+            storeBufferFill(queueId, base, bytes, pattern, localDevice, memoryValueFill, true);
+        }, {{base, base + bytes}});
+    } else {
+        storeBufferFill(queueId, base, bytes, pattern, localDevice, memoryFill.has_value(), true);
+    }
     return true;
 }
 

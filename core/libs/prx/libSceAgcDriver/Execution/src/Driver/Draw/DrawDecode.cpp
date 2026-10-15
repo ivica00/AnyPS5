@@ -1,7 +1,11 @@
+#include <filesystem>
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
+
+#include <cstdio>
+#include <cstdlib>
 
 namespace AgcDriver::DriverDetail {
 
@@ -131,6 +135,9 @@ std::shared_ptr<DrawDecode> Driver::decodeDraw(const QueueState& queue, const Su
     if (product->pixel.ancillary) product->pixel.rasterPrimitive = Graphics::RasterPrimitiveOf(product->state);
     if (product->pixel.ancillary) product->pixel.layerExported = product->state.layerExports != 0;
     product->pixel.ditheredAlphaToCoverage = product->state.ditheredAlphaToCoverage;
+    if (std::getenv("APS5_DUMP_STORAGE") != nullptr && (std::getenv("APS5_LUT_CAPTURE_GATE") == nullptr || std::filesystem::exists(std::getenv("APS5_LUT_CAPTURE_GATE"))) && product->state.hasColorTarget && product->state.color.extent.width == 32 && product->state.color.extent.height == 32 && product->state.color.depth == 32) {
+        static unsigned traces = 0;
+    }
     return product;
 }
 

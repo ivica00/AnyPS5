@@ -3204,6 +3204,7 @@ struct MockVulkan {
 };
 
 MockVulkan mock;
+std::unordered_map<VkDeviceMemory, void*> importedHostPointers;
 
 template<typename THandle>
 THandle makeHandle() {
@@ -3232,6 +3233,11 @@ VKAPI_ATTR VkResult VKAPI_CALL mockAllocateMemory(VkDevice, const VkMemoryAlloca
     mock.memories[*memory] = std::vector<std::byte>(info->allocationSize);
     mock.allocationSizes[*memory] = info->allocationSize;
     mock.allocatedBytes += info->allocationSize;
+    for (auto* item = static_cast<const VkBaseInStructure*>(info->pNext); item != nullptr; item = item->pNext) {
+        if (item->sType == VK_STRUCTURE_TYPE_IMPORT_MEMORY_HOST_POINTER_INFO_EXT) {
+            importedHostPointers[*memory] = reinterpret_cast<const VkImportMemoryHostPointerInfoEXT*>(item)->pHostPointer;
+        }
+    }
     if (info->pNext != nullptr) {
         const auto* flags = static_cast<const VkMemoryAllocateFlagsInfo*>(info->pNext);
         mock.allocationFlags[*memory] = flags->flags;
@@ -3249,13 +3255,16 @@ VKAPI_ATTR VkResult VKAPI_CALL mockBindBufferMemory(VkDevice, VkBuffer buffer, V
 }
 
 std::span<std::byte> mockBufferMemory(VkBuffer buffer) {
+    if (const auto imported = importedHostPointers.find(mock.bufferMemory.at(buffer)); imported != importedHostPointers.end()) {
+        return {static_cast<std::byte*>(imported->second) + mock.bufferOffset.at(buffer), static_cast<std::size_t>(mock.bufferSizes.at(buffer))};
+    }
     auto& memory = mock.memories.at(mock.bufferMemory.at(buffer));
     return std::span<std::byte>(memory).subspan(static_cast<std::size_t>(mock.bufferOffset.at(buffer)), static_cast<std::size_t>(mock.bufferSizes.at(buffer)));
 }
 
 VKAPI_ATTR VkResult VKAPI_CALL mockMapMemory(VkDevice, VkDeviceMemory memory, VkDeviceSize offset, VkDeviceSize, VkMemoryMapFlags, void** data) {
     Require(offset == 0, "mock memory must be mapped from offset zero");
-    *data = mock.memories.at(memory).data();
+    *data = importedHostPointers.contains(memory) ? importedHostPointers.at(memory) : mock.memories.at(memory).data();
     return VK_SUCCESS;
 }
 
@@ -3266,6 +3275,7 @@ VKAPI_ATTR void VKAPI_CALL mockDestroyBuffer(VkDevice, VkBuffer, const VkAllocat
 }
 
 VKAPI_ATTR void VKAPI_CALL mockFreeMemory(VkDevice, VkDeviceMemory memory, const VkAllocationCallbacks*) {
+    importedHostPointers.erase(memory);
     if (const auto found = mock.allocationSizes.find(memory); found != mock.allocationSizes.end()) {
         mock.allocatedBytes -= found->second;
         mock.allocationSizes.erase(found);

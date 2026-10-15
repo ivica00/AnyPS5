@@ -83,6 +83,8 @@ public:
     void FlushKeyStores();
     void FlushKeyStoresOverlapping(std::uint64_t address, std::size_t bytes) { if (HasQueuedKeyStores() && QueuedKeyStoreOverlaps(address, bytes)) FlushKeyStores(); }
     bool Recording() const { return open != nullptr; }
+    bool RenderPassOpen() const;
+    std::uint64_t RenderPassKey() const;
     bool Idle() const { return open == nullptr && inFlight.empty(); }
     std::uint64_t OpenSerial() const { return submissions + 1; }
     std::uint64_t CompletedThrough() const { return inFlight.empty() ? submissions : inFlight.front()->serial - 1; }
@@ -853,6 +855,9 @@ private:
     mutable std::weak_ptr<const WriteRanges> publishedWriteRanges;
     mutable bool publishedWriteRangesValid = false;
 };
+
+inline bool Recorder::RenderPassOpen() const { return open != nullptr && open->renderPass.open; }
+inline std::uint64_t Recorder::RenderPassKey() const { return open != nullptr && open->renderPass.open ? open->renderPass.key : 0; }
 
 }
 

@@ -22,6 +22,7 @@
 #include <stdexcept>
 #include <string>
 #include <tuple>
+#include <map>
 #include <unordered_map>
 #include <vector>
 #ifdef _WIN32
@@ -1065,10 +1066,30 @@ bool collectMemoEnabled() {
 // thread that never bumps its epoch never match (each collect gets a fresh epoch), as intended.
 // APS5_SHARED_COLLECT_MEMO=1 uses the tracker's shared ring under its mutex instead.
 struct ThreadCollectMemo {
-    std::array<WriteTracker::Memo, 64> entries{};
+    std::array<WriteTracker::Memo, 256> entries{};
     std::size_t next = 0;
 };
 thread_local ThreadCollectMemo threadCollectMemo;
+
+struct EpochCollectMap {
+    std::uint64_t epoch = 0;
+    std::map<std::uintptr_t, WriteTracker::Memo> ranges;
+};
+
+EpochCollectMap& epochCollectMap(std::uint64_t epoch) {
+    thread_local EpochCollectMap* slot = nullptr;
+    auto& map = ShaderRecompiler::ThreadOwned(slot);
+    if (map.epoch != epoch) {
+        map.ranges.clear();
+        map.epoch = epoch;
+    }
+    return map;
+}
+
+bool epochCollectMapEnabled() {
+    static const bool enabled = std::getenv("APS5_NO_EPOCH_COLLECT_MAP") == nullptr;
+    return enabled;
+}
 
 bool sharedCollectMemo() {
     static const bool shared = std::getenv("APS5_SHARED_COLLECT_MEMO") != nullptr;
@@ -1155,6 +1176,19 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
     if (useMemo && !sharedCollectMemo()) {
         // An entry exists only for a completed walk of an in-arena range, so the tracker is
         // initialized and watched; nothing below the lock needs asking.
+        if (epochCollectMapEnabled()) {
+            const auto& map = epochCollectMap(epoch);
+            if (!map.ranges.empty()) {
+                const auto it = map.ranges.upper_bound(first);
+                if (it != map.ranges.begin()) {
+                    const auto& memo = std::prev(it)->second;
+                    if (memo.unwatched == unwatched && first >= memo.begin && stop <= memo.end) {
+                        collectMemoHits.fetch_add(1, std::memory_order_relaxed);
+                        return tracker.generation.load(std::memory_order_relaxed);
+                    }
+                }
+            }
+        }
         for (const auto& entry : threadCollectMemo.entries) {
             if (entry.epoch == epoch && entry.unwatched == unwatched && entry.begin <= first && stop <= entry.end) {
                 // The current generation, not the memoized one: blocks stamped since (MarkWritten, an
@@ -1178,7 +1212,6 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
         }
     }
     const TimedAccess timed(CounterCollect, bytes);
-#ifndef _WIN32
     if (useMemo && threadCollectEpoch != 0 && bytes <= WriteBlockBytes) {
         const auto begin = first & ~(WriteBlockBytes - 1);
         const auto end = (stop + WriteBlockBytes - 1) & ~(WriteBlockBytes - 1);
@@ -1187,13 +1220,24 @@ std::uint64_t collectWrites(std::uint64_t address, std::size_t bytes, bool memoi
             stop = end;
         }
     }
-#endif
     if (!walkWrites(tracker, first, stop, StampKind::Cpu)) return 0;
     // Only a completed walk is remembered; a failed one (uncommitted pages) returned 0 above.
     if (collectMemoEnabled()) {
         const auto serial = unwatchSerial.load(std::memory_order_relaxed);
         if (sharedCollectMemo()) tracker.memo[tracker.nextMemo++ % tracker.memo.size()] = {first, stop, epoch, serial};
-        else threadCollectMemo.entries[threadCollectMemo.next++ % threadCollectMemo.entries.size()] = {first, stop, epoch, serial};
+        else {
+            threadCollectMemo.entries[threadCollectMemo.next++ % threadCollectMemo.entries.size()] = {first, stop, epoch, serial};
+            if (epochCollectMapEnabled()) {
+                auto& ranges = epochCollectMap(epoch).ranges;
+                const auto it = ranges.upper_bound(first);
+                bool covered = false;
+                if (it != ranges.begin()) {
+                    const auto& prev = std::prev(it)->second;
+                    if (prev.unwatched == serial && first >= prev.begin && stop <= prev.end) covered = true;
+                }
+                if (!covered) ranges[first] = {first, stop, epoch, serial};
+            }
+        }
     }
     return tracker.generation;
 }

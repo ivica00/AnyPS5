@@ -956,7 +956,7 @@ State DecodeState(const QueueState& queue, bool vertexWorkgroup) {
     result.pixelEarlyZ = !PixelProgramSkipped(queue) && PixelEarlyZ(read(cx, 0x203));
     if ((read(cx, 0x207) & LayerExports & ~result.layerExports & ~(1u << 21u)) != 0) {
         static bool reported = false;
-        if (!reported) {
+        if (!reported && (!result.hasColorTarget || (result.color.depthSlice == 0 && result.color.arraySlice == 0))) {
             reported = true;
             std::fprintf(stderr, "[gpu] layer/viewport index vertex exports are ignored (PA_CL_VS_OUT_CNTL=0x%08x)\n", read(cx, 0x207));
         }
@@ -1170,7 +1170,8 @@ std::uint32_t GuestFormatFor(VkFormat format, std::uint32_t elementBytes) {
 }
 
 GuestTextureResource SurfaceForTarget(const ColorTarget& color) {
-    Require(color.tileMode != ColorTileMode::Linear, "linear color targets are not resident");
+    static const bool residentLinear = std::getenv("APS5_RESIDENT_LINEAR_TARGETS") != nullptr;
+    Require(color.tileMode != ColorTileMode::Linear || residentLinear, "linear color targets are not resident (APS5_RESIDENT_LINEAR_TARGETS)");
     const bool chain = color.mipCount > 1;
     GuestTextureResource surface{};
     surface.baseAddress = chain ? color.surfaceAddress : color.address;
@@ -1239,6 +1240,7 @@ ColorTarget DecodeColorBuffer(const Registers& cx, std::uint32_t slot, bool allo
         Require(lastSlice <= (attrib3 & 0x1fffu), "the color view slice is beyond the array surface");
         color.arrayLastSlice = attrib3 & 0x1fffu;
         color.arraySlice = slice;
+        color.layers = lastSlice >= slice ? lastSlice + 1u - slice : 1u;
     }
     if (!volume && lastSlice != slice) {
         const auto exports = find(cx, 0x207);

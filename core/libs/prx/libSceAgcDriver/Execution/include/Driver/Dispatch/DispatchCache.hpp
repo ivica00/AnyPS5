@@ -22,6 +22,7 @@
 namespace AgcDriver::DriverDetail {
 
 inline constexpr std::size_t MaxDispatchVariants = 8;
+inline constexpr std::size_t MaxDrawVariants = 128;
 
 struct DispatchVariant {
 
@@ -41,12 +42,41 @@ struct DispatchVariant {
 
     std::uint32_t pushOffset = 0;
     std::shared_ptr<const ShaderRecompiler::ShaderVertexStageInfo> vertexInfo;
+    std::uint32_t firstUserSgpr = 8;
+    std::vector<std::uint32_t> userData;
+    std::vector<std::uint32_t> userDataRegisters;
 
     std::shared_ptr<ShaderMemory> memory;
     std::vector<ShaderRecompiler::MemoryRegion> captured;
     std::vector<std::pair<std::uint64_t, std::size_t>> spans;
+    // Draw validation stamp (lookupDraw): generation is the write-tracker value collected before the
+    // compare that last returned Equal, published with release after the serials below. A later
+    // lookup skips validateVariant while those serials still match and every span is unchanged
+    // since that generation. 0 means there is no stamp.
     std::atomic<std::uint64_t> generation{0};
+    std::atomic<std::uint64_t> proofPublish{0};
+    std::atomic<std::uint64_t> proofPending{0};
+    std::atomic<std::uint64_t> proofForget{0};
+    std::atomic<std::uint64_t> proofShadow{0};
 };
+
+// Merged guest runs a draw stamp watches (ranges within 64 KiB become one span, as a dispatch's
+// stamp does). Filled before the variant is published; a stamp with empty spans is only valid
+// when the variant has no runs.
+inline void FillValidationSpans(DispatchVariant& variant) {
+    variant.spans.clear();
+    variant.spans.reserve(variant.runs.size());
+    for (const auto& [begin, end] : variant.runs) {
+        if (end <= begin) continue;
+        const auto bytes = static_cast<std::size_t>(end - begin);
+        if (!variant.spans.empty() && begin <= variant.spans.back().first + variant.spans.back().second + 65536) {
+            auto& last = variant.spans.back();
+            last.second = static_cast<std::size_t>(std::max(last.first + last.second, end) - last.first);
+        } else {
+            variant.spans.emplace_back(begin, bytes);
+        }
+    }
+}
 
 struct DispatchEntry {
     std::vector<std::shared_ptr<DispatchVariant>> variants;

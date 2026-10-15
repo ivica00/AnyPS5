@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Execution/include/Driver/Driver.hpp"
+#include "prx/libSceAgcDriver/Execution/include/Driver/Draw/DrawPipeline.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Diagnostics.hpp"
 #include "prx/libSceAgcDriver/Execution/include/Driver/Shaders/ShaderRegistry.hpp"
 #include "prx/libSceAgcDriver/Execution/include/GuestMemory.hpp"
@@ -114,6 +115,7 @@ void Driver::stop() {
     }
     StopWorkerSampler();
     CloseRegistrationPreparation();
+    DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Submission);
     std::lock_guard gpuLock(GuestMemory::GpuMutex());
     device.Reset();
     replacedDevices.clear();
@@ -168,6 +170,8 @@ void Driver::WaitIdle() {
     --idleWaiters;
     rethrowFailure();
     checkStopping();
+    lock.unlock();
+    DrawPipeline::Queue0().Drain(DrawPipeline::DrainReason::Submission);
 }
 
 void Driver::CheckFailure() {

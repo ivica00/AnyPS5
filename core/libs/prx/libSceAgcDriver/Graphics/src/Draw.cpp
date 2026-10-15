@@ -372,6 +372,7 @@ struct DrawOutcome {
     std::uint64_t fullScissorLookups = 0;
     std::uint64_t partialLookups = 0;
     std::uint64_t pagesWalked = 0;
+    std::uint64_t targetProofHits = 0;
     double lookupUs = 0;
     // How the draw's resources came about (DrawKind), for the per-kind averages.
     std::size_t kind = 0;
@@ -396,6 +397,7 @@ struct DrawProfile {
     std::uint64_t fullScissorLookups = 0;
     std::uint64_t partialLookups = 0;
     std::uint64_t pagesWalked = 0;
+    std::uint64_t targetProofHits = 0;
     double lookupUs = 0;
     std::array<double, PhaseCount> totalsUs{};
     // The longest single draw's time per phase, and the longest draw: the [lock] line's 'draw'
@@ -502,6 +504,7 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     profile.fullScissorLookups += outcome.fullScissorLookups;
     profile.partialLookups += outcome.partialLookups;
     profile.pagesWalked += outcome.pagesWalked;
+    profile.targetProofHits += outcome.targetProofHits;
     profile.lookupUs += outcome.lookupUs;
     if (outcome.kind < KindCount) {
         ++profile.kindCounts[outcome.kind];
@@ -524,7 +527,7 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
         if (profile.totalsUs[i] <= 0) continue;
         n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " %s=%.1fms", DrawPhaseNames[i], profile.totalsUs[i] / 1000.0);
         if (i == PhaseResources && room()) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " (bindings %.1f, upload %.1f, descriptors %.1f, other %.1f of which %.1f in %llu address-based builds)", profile.bindingsUs / 1000.0, profile.uploadUs / 1000.0, profile.descriptorsUs / 1000.0, profile.otherUs / 1000.0, profile.addressOtherUs / 1000.0, static_cast<unsigned long long>(profile.addressBuilds));
-        if (i == PhaseReadTarget && room()) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " (%llu resident lookups, %llu of them >= 1 ms = %.1f; target lookups: full-scissor %llu / partial %llu / pages walked %llu / %.0f us)", static_cast<unsigned long long>(profile.targetLookups), static_cast<unsigned long long>(profile.slowLookups), profile.slowLookupUs / 1000.0, static_cast<unsigned long long>(profile.fullScissorLookups), static_cast<unsigned long long>(profile.partialLookups), static_cast<unsigned long long>(profile.pagesWalked), profile.lookupUs);
+        if (i == PhaseReadTarget && room()) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), " (%llu resident lookups, %llu of them >= 1 ms = %.1f; target lookups: full-scissor %llu / partial %llu / pages walked %llu / %.0f us; pass proofs %llu)", static_cast<unsigned long long>(profile.targetLookups), static_cast<unsigned long long>(profile.slowLookups), profile.slowLookupUs / 1000.0, static_cast<unsigned long long>(profile.fullScissorLookups), static_cast<unsigned long long>(profile.partialLookups), static_cast<unsigned long long>(profile.pagesWalked), profile.lookupUs, static_cast<unsigned long long>(profile.targetProofHits));
     }
     if (room()) n += std::snprintf(line + n, sizeof(line) - static_cast<std::size_t>(n), "; per kind (avg us, count):");
     for (std::size_t kind = 0; kind < KindCount && room(); ++kind) {
@@ -568,7 +571,7 @@ void reportDraw(const std::array<double, PhaseCount>& us, const ShaderResources:
     profile.recordedUs = profile.waitedUs = profile.synchronousUs = 0;
     profile.targetLookups = profile.slowLookups = 0;
     profile.slowLookupUs = 0;
-    profile.fullScissorLookups = profile.partialLookups = profile.pagesWalked = 0;
+    profile.fullScissorLookups = profile.partialLookups = profile.pagesWalked = profile.targetProofHits = 0;
     profile.lookupUs = 0;
     profile.kindUs.fill(0);
     profile.kindCounts.fill(0);
@@ -897,7 +900,8 @@ DrawInputCopy CopyDrawInput(const Context& context, Recorder* recorder, std::uin
         GuestMemory::FlushGpuWrites(address, bytes);
         copy.registryGeneration = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
         copy.generation = GuestMemory::CollectWrites(address, bytes);
-        if (copy.generation != 0) copy.buffer = recorder->ReusableDrawSnapshot(address, bytes, use, &copy.derived);
+        static const bool reuseSnapshots = std::getenv("APS5_REUSE_DRAW_SNAPSHOTS") != nullptr;
+        if (reuseSnapshots && copy.generation != 0) copy.buffer = recorder->ReusableDrawSnapshot(address, bytes, use, &copy.derived);
         if (copy.buffer != nullptr) {
             copy.reused = true;
             return copy;
@@ -1220,10 +1224,92 @@ DrawInputs prepareDrawInputs(const Context& context, const State& state, const P
     return inputs;
 }
 
+// Page-walk proof for one color attachment inside an open render pass. The first draw of the pass
+// walks the surface (refreshResidentTarget). While that pass stays open, a later draw of the same
+// color address and scissor reuses the image: the GPU already owns it, and a scissor change or a
+// closed pass walks again. APS5_NO_TARGET_PROOF=1 walks on every draw.
+struct TargetProofMemo {
+    std::uint64_t passKey = 0;
+    struct Slot {
+        std::uint64_t address = 0;
+        std::int32_t x = 0;
+        std::int32_t y = 0;
+        std::uint32_t width = 0;
+        std::uint32_t height = 0;
+        StorageTexture* image = nullptr;
+        std::uint64_t generation = 0, pending = 0, shadow = 0, registry = 0, forgotten = 0;
+    };
+    std::vector<Slot> slots;
+};
+
+bool targetProofEnabled() {
+    static const bool enabled = std::getenv("APS5_NO_TARGET_PROOF") == nullptr;
+    return enabled;
+}
+
+TargetProofMemo& targetProofMemo() {
+    thread_local TargetProofMemo memo;
+    return memo;
+}
+
+bool targetProofHit(std::uint64_t passKey, const ColorTarget& color, const VkRect2D& scissor, StorageTexture* image) {
+    if (!targetProofEnabled() || passKey == 0 || image == nullptr) return false;
+    const auto& memo = targetProofMemo();
+    if (memo.passKey != passKey) return false;
+    for (const auto& slot : memo.slots) {
+        if (slot.address != color.address || slot.image != image || slot.x != scissor.offset.x || slot.y != scissor.offset.y || slot.width != scissor.extent.width || slot.height != scissor.extent.height) continue;
+        if (slot.generation == 0 || slot.pending != StorageTexture::PendingSerial() || slot.shadow != ShadowSerial() || slot.registry != GuestAllocations::GuestAllocationsGeneration_nid_postfix() || slot.forgotten != GuestMemory::ForgetSerial() || (slot.forgotten & 1u) != 0) return false;
+        return GuestMemory::CollectWrites(color.address, static_cast<std::size_t>(color.bytes)) != 0 && GuestMemory::UnchangedSince(color.address, static_cast<std::size_t>(color.bytes), slot.generation);
+    }
+    return false;
+}
+
+void rememberTargetProof(std::uint64_t passKey, const ColorTarget& color, const VkRect2D& scissor, StorageTexture* image) {
+    if (!targetProofEnabled() || passKey == 0 || image == nullptr) return;
+    const auto generation = GuestMemory::CollectWrites(color.address, static_cast<std::size_t>(color.bytes));
+    if (generation == 0) return;
+    auto& memo = targetProofMemo();
+    if (memo.passKey != passKey) {
+        memo.passKey = passKey;
+        memo.slots.clear();
+    }
+    for (auto& slot : memo.slots) {
+        if (slot.address != color.address) continue;
+        slot.x = scissor.offset.x;
+        slot.y = scissor.offset.y;
+        slot.width = scissor.extent.width;
+        slot.height = scissor.extent.height;
+        slot.image = image;
+        slot.generation = generation;
+        slot.pending = StorageTexture::PendingSerial();
+        slot.shadow = ShadowSerial();
+        slot.registry = GuestAllocations::GuestAllocationsGeneration_nid_postfix();
+        slot.forgotten = GuestMemory::ForgetSerial();
+        return;
+    }
+    memo.slots.push_back({color.address, scissor.offset.x, scissor.offset.y, scissor.extent.width, scissor.extent.height, image, generation, StorageTexture::PendingSerial(), ShadowSerial(), GuestAllocations::GuestAllocationsGeneration_nid_postfix(), GuestMemory::ForgetSerial()});
+}
+
+void noteOpenTargetProofs(const Recorder& recorder, std::span<const std::shared_ptr<StorageTexture>> images, std::span<const ColorTarget> colors, const VkRect2D& scissor) {
+    if (!recorder.RenderPassOpen()) return;
+    const auto key = recorder.RenderPassKey();
+    const auto count = std::min(images.size(), colors.size());
+    for (std::size_t index = 0; index < count; ++index) {
+        if (images[index] != nullptr) rememberTargetProof(key, colors[index], scissor, images[index].get());
+    }
+}
+
+void countTargetProof(const State& state, const ColorTarget& color, DrawOutcome& outcome) {
+    ++outcome.targetLookups;
+    ++outcome.targetProofHits;
+    const bool fullScissor = state.scissor.offset.x <= 0 && state.scissor.offset.y <= 0 && state.scissor.extent.width >= color.extent.width && state.scissor.extent.height >= color.extent.height;
+    ++(fullScissor ? outcome.fullScissorLookups : outcome.partialLookups);
+}
+
 // The resident-target proof of one attachment (StorageTexture::Refresh: FlushPending, CollectWrites
 // over the target's pages, the DCC key scan of TextureClearKeys, then UnchangedSince), with the
 // [draws] target-lookup accounting. `lookup` makes (or finds) the image; DrawWithRecipe refreshes
-// the stored object instead.
+// the stored object instead. A pass proof (targetProofHit) skips this walk.
 std::shared_ptr<StorageTexture> refreshResidentTarget(const Context& context, const State& state, const ColorTarget& color, DrawOutcome& outcome, bool profile, const std::function<std::shared_ptr<StorageTexture>()>& lookup) {
     const auto lookupStart = std::chrono::steady_clock::now();
     const auto walkedBefore = profile ? GuestMemory::ThreadCollectedBytes() : 0;
@@ -1987,27 +2073,47 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         timer.phase(PhaseSetup);
         // Debug aid: APS5_NO_RESIDENT_TARGETS=1 copies every target in and out again.
         static const bool residentTargets = std::getenv("APS5_NO_RESIDENT_TARGETS") == nullptr;
-        if ((binding.gpuTiling || (color.tileMode != ColorTileMode::Linear && context.detiler != nullptr)) && residentTargets) {
-            // The lookup refreshes the image on every draw (StorageTexture::Refresh: FlushPending,
-            // CollectWrites over the target's pages, the DCC key scan of TextureClearKeys, then
-            // UnchangedSince). The page walk is skipped while the worker's collect epoch lasts
-            // (GuestMemory::BumpCollectEpoch: ordering points of the queue, or every packet under
-            // APS5_PACKET_EPOCH=1); the key scan runs on every lookup regardless. Lookups of a
-            // millisecond or more are counted apart; the [texture] line says how many uploaded.
-            binding.resident = refreshResidentTarget(context, state, color, outcome, profile, [&] {
-                if (color.arrayLastSlice != 0) {
-                    Require(color.dccAddress == 0 && color.cmaskAddress == 0 && AttachmentProxyFormat(context, color.format) == VK_FORMAT_UNDEFINED, "a slice of a 2D array color target with DCC, CMASK or an attachment proxy has no resident array image");
-                    const auto array = ArraySurfaceForTarget(color);
-                    Require(color.surfaceAddress == color.arrayAddress + color.arraySlice * DescribeSurface(array).layerBytes, "the array image's layer pitch differs from the color view's slice offset");
-                    auto resident = CachedStorageSurface(context, array);
-                    Require(resident->Attachable(), "storage format cannot be a color attachment");
-                    return resident;
+        static const bool residentLinear = std::getenv("APS5_RESIDENT_LINEAR_TARGETS") != nullptr;
+        const bool linearResident = residentLinear && color.tileMode == ColorTileMode::Linear && RegisteredReadableCovers(color.address, static_cast<std::size_t>(color.bytes));
+        if ((binding.gpuTiling || ((color.tileMode != ColorTileMode::Linear || linearResident) && context.detiler != nullptr)) && residentTargets) {
+            // The lookup refreshes the image (StorageTexture::Refresh: FlushPending, CollectWrites
+            // over the target's pages, the DCC key scan, then UnchangedSince), except when this
+            // pass already proved the same color address and scissor (targetProofHit): that draw
+            // does not walk the pages again. The collect-epoch memo still covers repeated walks
+            // inside one epoch. Lookups of a millisecond or more are counted apart.
+            const auto surface = color.arrayLastSlice != 0 ? ArraySurfaceForTarget(color) : SurfaceForTarget(color);
+            auto* proofRecorder = Recorder::Active();
+            std::shared_ptr<StorageTexture> proved;
+            if (proofRecorder != nullptr && proofRecorder->RenderPassOpen()) {
+                if (auto found = FindCachedStorageSurface(context, surface); found != nullptr && targetProofHit(proofRecorder->RenderPassKey(), color, state.scissor, found.get()) && StorageImageServesKeys(*found, color.dccAddress)) {
+                    if (color.arrayLastSlice != 0) {
+                        Require(color.dccAddress == 0 && color.cmaskAddress == 0 && AttachmentProxyFormat(context, color.format) == VK_FORMAT_UNDEFINED, "a slice of a 2D array color target with DCC, CMASK or an attachment proxy has no resident array image");
+                        Require(color.surfaceAddress == color.arrayAddress + color.arraySlice * DescribeSurface(surface).layerBytes, "the array image's layer pitch differs from the color view's slice offset");
+                    }
+                    Require(found->Attachable(), "storage format cannot be a color attachment");
+                    if (color.arrayLastSlice == 0) Require(color.mipCount > 1 || color.depth > 1 || found->GuestBytes() == colorLayout.Bytes(), "resident image layout differs from the color layout");
+                    proved = std::move(found);
                 }
-                auto resident = CachedStorageSurface(context, SurfaceForTarget(color));
-                Require(resident->Attachable(), "storage format cannot be a color attachment");
-                Require(color.mipCount > 1 || color.depth > 1 || resident->GuestBytes() == colorLayout.Bytes(), "resident image layout differs from the color layout");
-                return resident;
-            });
+            }
+            if (proved != nullptr) {
+                materializeCmaskClear(context, color, proved);
+                binding.resident = std::move(proved);
+                if (profile) countTargetProof(state, color, outcome);
+            } else {
+                binding.resident = refreshResidentTarget(context, state, color, outcome, profile, [&] {
+                    if (color.arrayLastSlice != 0) {
+                        Require(color.dccAddress == 0 && color.cmaskAddress == 0 && AttachmentProxyFormat(context, color.format) == VK_FORMAT_UNDEFINED, "a slice of a 2D array color target with DCC, CMASK or an attachment proxy has no resident array image");
+                        Require(color.surfaceAddress == color.arrayAddress + color.arraySlice * DescribeSurface(surface).layerBytes, "the array image's layer pitch differs from the color view's slice offset");
+                        auto resident = CachedStorageSurface(context, surface);
+                        Require(resident->Attachable(), "storage format cannot be a color attachment");
+                        return resident;
+                    }
+                    auto resident = CachedStorageSurface(context, surface);
+                    Require(resident->Attachable(), "storage format cannot be a color attachment");
+                    Require(color.mipCount > 1 || color.depth > 1 || resident->GuestBytes() == colorLayout.Bytes(), "resident image layout differs from the color layout");
+                    return resident;
+                });
+            }
         }
         if (binding.resident != nullptr) {
             timer.phase(PhaseReadTarget);
@@ -2016,6 +2122,13 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
             continue;
         }
         materializeCmaskClear(context, color, nullptr);
+        static const bool traceSyncTargets = std::getenv("APS5_TRACE_SYNC_TARGETS") != nullptr;
+        if (traceSyncTargets) {
+            static std::mutex traceMutex;
+            static std::set<std::uint64_t> traced;
+            std::lock_guard lock(traceMutex);
+            if (traced.insert(color.address).second) std::fprintf(stderr, "[sync-target] 0x%llx %ux%u tile %d format %d element %u bytes 0x%llx gpuTiling %d detiler %d\n", static_cast<unsigned long long>(color.address), color.extent.width, color.extent.height, static_cast<int>(color.tileMode), static_cast<int>(color.format), color.elementBytes, static_cast<unsigned long long>(color.bytes), binding.gpuTiling ? 1 : 0, context.detiler != nullptr ? 1 : 0);
+        }
         Require(!color.mipTail || binding.gpuTiling, "rendering into a packed mip tail requires the GPU tiled fallback");
         Require(color.depth == 1, "rendering into a 3D color target needs the resident image of its surface");
         Require(color.arraySlice == 0 || !ColorTileModeIsXor(color.tileMode), "rendering into a slice of a 2D array color target with an XOR tile mode needs the resident image of its array");
@@ -2261,6 +2374,7 @@ void Draw(const Context& context, const State& state, const Pm4::DrawParameters&
         record.waited = outcome.waited;
         record.stencilReplay = stencilReplay;
         recordDraw(context, state, draw, shaders, inputs, record, outcome, timer, ownWaitedMs);
+        if ((outcome.passBegun || outcome.passContinued) && recorder != nullptr) noteOpenTargetProofs(*recorder, owners, state.colors, state.scissor);
         // The recipe for the caller's draw-cache entry (design_cpu_final M8, rule R3 for draws):
         // only a template the resource cache serves under this content key (reusable: no lease,
         // no copied writes, every direct region import- or mirror-served) of a direct draw, so a
@@ -2583,10 +2697,16 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
     // from the cache is a miss: the ordinary path looks up anew.
     std::vector<std::shared_ptr<StorageTexture>> targets;
     targets.reserve(recipe.targets.size());
+    const bool passContinued = recorder != nullptr && recorder->RenderPassOpen() && recorder->RenderPassKey() == recipe.passKey;
     for (std::size_t index = 0; index < recipe.targets.size(); ++index) {
         timer.phase(PhaseSetup);
         auto stored = recipe.targets[index].lock();
         if (stored == nullptr || !StorageImageCached(context, stored.get()) || !StorageImageServesKeys(*stored, state.colors[index].dccAddress)) return miss(DrawRecipeMiss::TargetGone);
+        if (passContinued && targetProofHit(recorder->RenderPassKey(), state.colors[index], state.scissor, stored.get())) {
+            if (profile) ++outcome.targetLookups;
+            targets.push_back(std::move(stored));
+            continue;
+        }
         auto resident = refreshResidentTarget(context, state, state.colors[index], outcome, profile, [&] {
             stored->Refresh();
             return stored;
@@ -2646,6 +2766,7 @@ DrawRecipeOutcome DrawWithRecipe(const Context& context, const State& state, con
     record.pushBytes = &recipe.pushBytes;
     record.pushStages = recipe.pushStages;
     recordDraw(context, state, draw, shaders, inputs, record, outcome, timer, ownWaitedMs);
+    if ((outcome.passBegun || outcome.passContinued) && recorder != nullptr) noteOpenTargetProofs(*recorder, record.targets, state.colors, state.scissor);
     if (profile) {
         result.recordUs = std::chrono::duration<double, std::micro>(std::chrono::steady_clock::now() - recordStart).count();
         auto& stats = Profile();

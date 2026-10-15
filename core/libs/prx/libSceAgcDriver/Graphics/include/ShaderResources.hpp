@@ -46,6 +46,9 @@ bool CompletePendingCpuWrites(const Context& context, std::uint64_t address, std
 // The cached storage image of a surface (render targets use it as their resident image); brought up
 // to date with guest memory before it is returned.
 std::shared_ptr<StorageTexture> CachedStorageSurface(const Context& context, const GuestTextureResource& resource);
+// The cached image only: no refresh, no create. Null when the surface is not cached or its DCC
+// metadata moved (the caller then takes CachedStorageSurface). A hit counts as a use, as a lookup.
+std::shared_ptr<StorageTexture> FindCachedStorageSurface(const Context& context, const GuestTextureResource& resource);
 // Whether `image` is still the storage cache's image of its surface (what CachedStorageSurface
 // would return); a true answer counts as a use for the cache's eviction order, as a lookup would.
 bool StorageImageCached(const Context& context, const StorageTexture* image);
@@ -81,6 +84,8 @@ public:
     };
     SetAllocation Allocate(VkDescriptorSetLayout layout, std::span<const VkDescriptorPoolSize> sizes, bool updateAfterBind = false, std::optional<std::uint32_t> variableCount = std::nullopt);
     void Free(const SetAllocation& allocation) noexcept;
+    SetAllocation AllocateRewritten(VkDescriptorSetLayout layout, std::span<const VkDescriptorPoolSize> sizes);
+    void Recycle(VkDescriptorSetLayout layout, const SetAllocation& allocation) noexcept;
     // APS5_PROFILE_DRAW counters: layouts served from the map / created, sets allocated, pools opened.
     struct Stats {
         std::uint64_t layoutHits = 0;
@@ -106,6 +111,7 @@ private:
     std::vector<Pool> pools;
     std::vector<Pool> updateAfterBindPools;
     std::vector<VkDescriptorPool> dedicated;
+    std::unordered_map<VkDescriptorSetLayout, std::vector<SetAllocation>> recycled;
     Stats stats;
 };
 
@@ -152,6 +158,8 @@ public:
             std::shared_ptr<Buffer> buffer;
         };
         DescriptorCache* cache = nullptr;
+        VkDescriptorSetLayout layout = VK_NULL_HANDLE;
+        VkDescriptorSetLayout fragmentLayout = VK_NULL_HANDLE;
         DescriptorCache::SetAllocation fragmentAllocation;
         DescriptorCache::SetAllocation allocation;
         std::vector<Snapshot> snapshots;

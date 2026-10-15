@@ -99,6 +99,8 @@ std::shared_ptr<const ShaderRecompiler::RecompileResult> Driver::materializeDraw
         throw named(error);
     }
     stageCapture.capture = capture;
+    stageCapture.userDataRegisters = invocation.UserDataRegisters();
+    stageCapture.firstUserSgpr = program.firstUserSgpr;
     timing.Mark("materialize");
     phaseTiming.Phase(DrawRowRecompile);
     return stageCapture.compiled;
@@ -151,6 +153,9 @@ void Driver::cacheDrawStages(bool useDrawEntries, bool drawHit, const Pm4::DrawP
             variant->shader = programs[i].snapshot;
             variant->forgetSerial = stageCapture.forgetSerial;
             variant->pushOffset = stageCapture.pushOffset;
+            variant->firstUserSgpr = stageCapture.firstUserSgpr;
+            variant->userData = programs[i].userData;
+            variant->userDataRegisters = stageCapture.userDataRegisters;
             if (vertexInfos[i]) variant->vertexInfo = std::make_shared<const ShaderRecompiler::ShaderVertexStageInfo>(*vertexInfos[i]);
 
             std::vector<ShaderRecompiler::MemoryRegion> regions(stageCapture.regions.begin(), stageCapture.regions.end());
@@ -186,6 +191,7 @@ void Driver::cacheDrawStages(bool useDrawEntries, bool drawHit, const Pm4::DrawP
                     continue;
                 }
             }
+            FillValidationSpans(*variant);
             fresh[i] = std::move(variant);
         }
         insertDrawEntry(drawKey, fresh, registerKey ? decode : nullptr, registerKey && drawDataHits() ? shapeKey : 0);

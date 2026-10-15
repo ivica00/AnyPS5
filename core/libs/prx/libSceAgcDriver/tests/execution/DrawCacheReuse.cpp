@@ -132,10 +132,13 @@ void ThirdDrawHitsTheCache(bool libraries) {
     const auto counters = Submit(32.0f, {1.0f, 1.0f, 1.0f});
     const auto mode = std::string(libraries ? "with" : "without") + " graphics pipeline libraries";
     const auto layout = counters.misses[static_cast<std::size_t>(DrawMiss::Layout)];
-    Require(counters.lookups == 3 && counters.absent == 2, mode + ": the three draws made " + std::to_string(counters.lookups) + " draw-cache lookups (" + std::to_string(counters.absent) + " without an entry), expected 3 lookups with 2 absent");
+    static const bool dataHits = std::getenv("APS5_NO_DRAW_DATA_HITS") == nullptr;
+    const std::uint64_t expectedAbsent = dataHits ? 1 : 2;
+    const std::uint64_t expectedHits = dataHits ? 2 : 1;
+    Require(counters.lookups == 3 && counters.absent == expectedAbsent, mode + ": the three draws made " + std::to_string(counters.lookups) + " draw-cache lookups (" + std::to_string(counters.absent) + " without an entry), expected 3 lookups with " + std::to_string(expectedAbsent) + " absent");
     Require(counters.inserts == 1, mode + ": the three draws inserted " + std::to_string(counters.inserts) + " draw entries, expected 1: a key is cached the second time it is seen");
     Require(layout == 0, mode + ": the repeated draw missed the draw cache on its push offset (" + std::to_string(layout) + " layout misses)");
-    Require(counters.hits == 1, mode + ": the repeated draw did not reuse the cached draw (" + std::to_string(counters.hits) + " hits)");
+    Require(counters.hits == expectedHits, mode + ": the repeated draw did not reuse the cached draw (" + std::to_string(counters.hits) + " hits, expected " + std::to_string(expectedHits) + ")");
 }
 
 void UserDataDrawsReuseTheirShape(bool libraries) {
@@ -151,7 +154,7 @@ void UserDataDrawsReuseTheirShape(bool libraries) {
     Require(verify ? known.dataVerified - before.dataVerified == 3 : known.dataStagesReused - before.dataStagesReused == 3, mode + ": the data-only hits reused " + std::to_string(known.dataStagesReused - before.dataStagesReused) + " stages and verified " + std::to_string(known.dataVerified - before.dataVerified) + ", expected the 3 vertex stages, whose user words did not change");
     const auto fresh = Submit(16.0f, {5.0f, 6.0f, 7.0f});
     Require(fresh.inserts - known.inserts == 1, mode + ": three keys of a new shape inserted " + std::to_string(fresh.inserts - known.inserts) + " draw entries, expected 1: the shape's second key");
-    Require(fresh.dataHits - known.dataHits == 1, mode + ": the third key of a new shape made " + std::to_string(fresh.dataHits - known.dataHits) + " data-only hits, expected 1");
+    Require(fresh.dataHits - known.dataHits == 2, mode + ": the second and third keys of a new shape made " + std::to_string(fresh.dataHits - known.dataHits) + " data-only hits, expected 2 after first-sight admission");
 }
 
 void StageDataHitsRefreshTheirWords(bool libraries) {
@@ -164,7 +167,8 @@ void StageDataHitsRefreshTheirWords(bool libraries) {
     PixelConstant[0] = 0.25f;
     const auto before = AgcDriver::DriverDetail::Driver::Get().DrawCacheCounters();
     const auto cached = SubmitConstantDraws(3);
-    Require(cached.inserts - before.inserts == 1 && cached.hits - before.hits == 1, mode + ": three draws of a pixel shader reading a constant through its user words did not insert once and hit once");
+    const auto expectedHits = std::getenv("APS5_NO_DRAW_DATA_HITS") == nullptr ? 2u : 1u;
+    Require(cached.inserts - before.inserts == 1 && cached.hits - before.hits == expectedHits, mode + ": repeated constant-buffer draws did not reuse their first admitted shape");
     Require(!enabled || cached.stageDataInserts - before.stageDataInserts == 1, mode + ": the inserted draw recorded " + std::to_string(cached.stageDataInserts - before.stageDataInserts) + " stages with data positions, expected the fragment stage");
     Require(BrightestColorByte() == 64, mode + ": the draws of constant 0.25 wrote " + std::to_string(BrightestColorByte()) + ", expected 64");
     PixelConstant[0] = 1.0f;
@@ -211,7 +215,8 @@ void RetainedPixelCacheTransitions() {
     Require(sceAgcDriverSubmitDcb(&packet) == 0, "retained pixel cache transitions failed to submit");
     AgcDriverWaitIdle_nid_postfix();
     const auto after = AgcDriver::DriverDetail::Driver::Get().DrawCacheCounters();
-    Require(after.lookups - before.lookups == 21 && after.absent - before.absent == 8 && after.inserts - before.inserts == 4 && after.hits - before.hits == 13, "color, execution or alpha-to-coverage transitions reused the wrong cached draw");
+    const bool firstSight = std::getenv("APS5_NO_DRAW_DATA_HITS") == nullptr;
+    Require(after.lookups - before.lookups == 21 && after.absent - before.absent == (firstSight ? 4u : 8u) && after.inserts - before.inserts == 4 && after.hits - before.hits == (firstSight ? 17u : 13u), "color, execution or alpha-to-coverage transitions reused the wrong cached draw: lookups=" + std::to_string(after.lookups - before.lookups) + " absent=" + std::to_string(after.absent - before.absent) + " inserts=" + std::to_string(after.inserts - before.inserts) + " hits=" + std::to_string(after.hits - before.hits));
     if (std::getenv("APS5_VERIFY_DRAW_RECIPE") != nullptr) Require(after.verifyDecodes > before.verifyDecodes, "pixel cache transitions did not verify any cached decode");
     Require(after.verifyDecodeMismatches == before.verifyDecodeMismatches && after.facadeMismatches == before.facadeMismatches, "cached pixel transitions disagreed with fresh decoding");
 }

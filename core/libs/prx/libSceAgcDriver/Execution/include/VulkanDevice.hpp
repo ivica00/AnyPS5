@@ -21,6 +21,7 @@ namespace AgcDriver {
 
 namespace Graphics {
 class StorageTexture;
+class ShaderResources;
 }
 
 // Stage A of a dispatch's resource build (see VulkanDevice::PrepareDispatch); opaque to callers.

@@ -273,6 +273,105 @@ void Budget() {
     Expect(MemoryOf(probe.Handle()) != first, "the least recently used device buffer survived the eviction");
 }
 
+void SlotPressureOrder() {
+    mock = MockDevice{};
+    auto context = mockContext();
+    context.limits.maxMemoryAllocationCount = 18;
+    constexpr auto usage = VK_BUFFER_USAGE_TRANSFER_SRC_BIT;
+    auto first = std::make_unique<Buffer>(context, 2 * MiB, usage);
+    auto newest = std::make_unique<Buffer>(context, 2 * MiB, usage);
+    auto middle = std::make_unique<Buffer>(context, 3 * MiB, usage);
+    const auto firstMemory = MemoryOf(first->Handle());
+    const auto newestMemory = MemoryOf(newest->Handle());
+    const auto middleMemory = MemoryOf(middle->Handle());
+    first.reset();
+    newest.reset();
+    middle.reset();
+    {
+        Buffer taken(context, 2 * MiB, usage);
+        Expect(MemoryOf(taken.Handle()) == newestMemory, "a matching request did not take the newest retained slot");
+    }
+    { Buffer fourth(context, 4 * MiB, usage); }
+    { Buffer fifth(context, 5 * MiB, usage); }
+    Expect(mock.frees == 2 && !mock.memoryBytes.contains(firstMemory) && !mock.memoryBytes.contains(middleMemory), "slot pressure did not evict the globally oldest retained slots");
+    Buffer retained(context, 2 * MiB, usage);
+    Expect(MemoryOf(retained.Handle()) == newestMemory, "a taken and reinserted slot did not become the newest retained slot");
+}
+
+void SameKeyGrowthOrder() {
+    mock = MockDevice{};
+    auto context = mockContext();
+    context.limits.maxMemoryAllocationCount = 6 * 64;
+    constexpr auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    std::vector<std::unique_ptr<DeviceBuffer>> buffers;
+    std::vector<VkDeviceMemory> memories;
+    for (int i = 0; i < 96; ++i) {
+        buffers.push_back(std::make_unique<DeviceBuffer>(context, 16 * 1024, usage));
+        memories.push_back(MemoryOf(buffers.back()->Handle()));
+    }
+    for (auto& buffer : buffers) buffer.reset();
+    Expect(mock.frees == 32, "same-key growth did not evict the first 32 retained slots at the 64-slot limit");
+    for (std::size_t i = 0; i < memories.size(); ++i) {
+        Expect(mock.memoryBytes.contains(memories[i]) == (i >= 32), "same-key growth did not preserve global insertion order at slot " + std::to_string(i));
+    }
+    {
+        DeviceBuffer taken(context, 16 * 1024, usage);
+        Expect(MemoryOf(taken.Handle()) == memories.back(), "same-key growth did not preserve the newest matching slot");
+    }
+    { DeviceBuffer other(context, 32 * 1024, usage | VK_BUFFER_USAGE_INDEX_BUFFER_BIT); }
+    Expect(mock.frees == 33 && !mock.memoryBytes.contains(memories[32]) && mock.memoryBytes.contains(memories[33]), "another key did not evict the next globally oldest same-key slot");
+    DeviceBuffer newest(context, 16 * 1024, usage);
+    DeviceBuffer previous(context, 16 * 1024, usage);
+    Expect(MemoryOf(newest.Handle()) == memories[95] && MemoryOf(previous.Handle()) == memories[94], "taking the newest same-key slots after eviction lost their order");
+}
+
+void BytePressureOrder() {
+    mock = MockDevice{};
+    auto context = mockContext();
+    constexpr auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    auto oldest = std::make_unique<DeviceBuffer>(context, 176 * MiB, usage);
+    auto middle = std::make_unique<DeviceBuffer>(context, 140 * MiB, usage);
+    auto newest = std::make_unique<DeviceBuffer>(context, 128 * MiB, usage);
+    const auto oldestMemory = MemoryOf(oldest->Handle());
+    const auto middleMemory = MemoryOf(middle->Handle());
+    oldest.reset();
+    middle.reset();
+    newest.reset();
+    Expect(mock.frees == 0, "the byte pressure case did not fit the device budget before its final insertion");
+    { DeviceBuffer overBudget(context, 80 * MiB, usage | VK_BUFFER_USAGE_INDEX_BUFFER_BIT); }
+    Expect(mock.frees == 1 && !mock.memoryBytes.contains(oldestMemory), "byte pressure did not evict the globally oldest retained slot");
+    DeviceBuffer retained(context, 140 * MiB, usage);
+    Expect(MemoryOf(retained.Handle()) == middleMemory, "byte pressure evicted a newer retained slot");
+}
+
+void RecoveryReuseAndEviction() {
+    mock = MockDevice{};
+    auto context = mockContext();
+    context.limits.maxMemoryAllocationCount = 6;
+    constexpr auto usage = VK_BUFFER_USAGE_STORAGE_BUFFER_BIT;
+    auto active = std::make_unique<DeviceBuffer>(context, 2 * MiB, usage);
+    { DeviceBuffer idle(context, 2 * MiB, usage); }
+    mock.limit = 6 * MiB;
+    VkDeviceMemory recoveredMemory = VK_NULL_HANDLE;
+    {
+        DeviceBuffer recovered(context, 4 * MiB, usage);
+        recoveredMemory = MemoryOf(recovered.Handle());
+        Expect(mock.attempts == 4 && mock.frees == 1, "allocation pressure did not trim and retry once");
+    }
+    mock.limit = 0;
+    const auto made = mock.allocations;
+    {
+        DeviceBuffer reused(context, 4 * MiB, usage);
+        Expect(MemoryOf(reused.Handle()) == recoveredMemory && mock.allocations == made, "a recovered allocation was not reused after the retry");
+    }
+    {
+        DeviceBuffer replacement(context, 4 * MiB, usage | VK_BUFFER_USAGE_INDEX_BUFFER_BIT);
+    }
+    Expect(!mock.memoryBytes.contains(recoveredMemory) && mock.frees == 2, "slot pressure did not evict the reinserted recovered allocation");
+    DeviceBuffer afterEviction(context, 4 * MiB, usage);
+    Expect(MemoryOf(afterEviction.Handle()) != recoveredMemory, "an evicted recovered allocation was handed out again");
+}
+
 void AddressAndHostUnchanged() {
     mock = MockDevice{};
     auto context = mockContext();
@@ -536,6 +635,10 @@ int main() {
         LargerClass();
         KeptUntilFence();
         Budget();
+        SlotPressureOrder();
+        SameKeyGrowthOrder();
+        BytePressureOrder();
+        RecoveryReuseAndEviction();
         AddressAndHostUnchanged();
         SmallDeviceClasses();
         Slabs();

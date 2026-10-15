@@ -1706,6 +1706,26 @@ std::vector<std::byte> EncodeEntry(std::span<const std::byte> key, const Compile
     return wrapEntry(key, payload);
 }
 
+bool IsCurrentEntryHeader(std::span<const std::byte> bytes, std::uint64_t fileBytes) {
+    static_assert(sizeof(FileHeader) == EntryHeaderBytes);
+    if (bytes.size() < sizeof(FileHeader) || fileBytes < sizeof(FileHeader)) return false;
+    FileHeader header;
+    std::memcpy(&header, bytes.data(), sizeof(header));
+    if (header.magic != FileMagic || header.format != FormatVersion || header.sourceVersion != SourceVersion()) return false;
+    if (header.keyBytes > fileBytes - sizeof(header) || header.keyBytes > std::numeric_limits<std::size_t>::max() - sizeof(header) - 7) return false;
+    const auto offset = PayloadOffset(static_cast<std::size_t>(header.keyBytes));
+    return offset <= fileBytes && header.payloadBytes == fileBytes - offset;
+}
+
+std::span<const std::byte> EntryKey(std::span<const std::byte> file) {
+    if (!IsCurrentEntryHeader(file, file.size())) return {};
+    FileHeader header;
+    std::memcpy(&header, file.data(), sizeof(header));
+    const auto key = file.subspan(sizeof(header), static_cast<std::size_t>(header.keyBytes));
+    std::span<const std::byte> payload;
+    return unwrapEntry(file, key, payload) == LoadStatus::Loaded ? key : std::span<const std::byte>{};
+}
+
 LoadStatus DecodeEntry(std::span<const std::byte> file, std::span<const std::byte> key, CompiledVariant& variant, std::shared_ptr<const void> owner) {
     std::span<const std::byte> payload;
     const auto status = unwrapEntry(file, key, payload);

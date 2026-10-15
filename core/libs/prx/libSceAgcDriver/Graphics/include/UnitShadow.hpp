@@ -94,6 +94,9 @@ std::size_t PublishShadow(std::uint64_t address, std::size_t bytes, PublishScope
 // No GpuMutex, no tracker: conservative (a unit with a generation and no publish counts), for
 // hook-free readers and a build's stage A.
 bool AnyShadowedOverlaps(std::uint64_t address, std::size_t bytes);
+// Bumped whenever a unit's freshness changes (Recount). A draw validation stamp records it so a
+// new or dropped shadow cannot keep a stale Equal.
+std::uint64_t ShadowSerial();
 bool AnyShadowedOverlaps(std::span<const std::pair<std::uint64_t, std::uint64_t>> ranges);
 
 // The sources of a storage upload's surface-relative runs: [begin, end) pieces of them, each read

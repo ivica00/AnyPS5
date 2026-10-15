@@ -35,6 +35,7 @@ namespace {
 using ImageTableAbi::PoisonReason;
 
 std::atomic<std::uint64_t> specializationNanoseconds{0};
+std::atomic<std::uint64_t> evaluateNanoseconds{0}, materializeNanoseconds{0};
 
 bool MaterializeProfiled() {
     static const bool profile = std::getenv("APS5_PROFILE_DRAW") != nullptr;
@@ -1634,6 +1635,7 @@ IrResourcePlan ResourceMaterializer::ExtractPlan(const IrProgram& program) const
 }
 
 void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtRuntime& runtime, ResourceSnapshot& snapshot) const {
+    const auto materializeStarted = MaterializeProfiled() ? std::chrono::steady_clock::now() : std::chrono::steady_clock::time_point{};
     const IrResourcePlan& plan = program;
     if (!plan.resourceTrackingComplete) {
         throw std::runtime_error("ResourceMaterializer::Materialize requires a completed resource plan");
@@ -1646,6 +1648,7 @@ void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtR
     std::vector<std::uint8_t> activeSources;
     try {
         materializeSnapshot(plan, runtime, walker, nextSnapshot, activeSources);
+        if (MaterializeProfiled()) evaluateNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - materializeStarted).count()), std::memory_order_relaxed);
         TableSnapshotter(plan, runtime, walker, activeSources, nextSnapshot.tables).Run();
     } catch (...) {
         reportTables();
@@ -1658,7 +1661,11 @@ void ResourceMaterializer::Materialize(const IrResourcePlan& program, const SrtR
     if (MaterializeProfiled()) specializationNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - started).count()), std::memory_order_relaxed);
     snapshot = std::move(nextSnapshot);
     reportTables();
+    if (MaterializeProfiled()) materializeNanoseconds.fetch_add(static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::steady_clock::now() - materializeStarted).count()), std::memory_order_relaxed);
 }
+
+std::uint64_t ResourceMaterializer::EvaluateNanoseconds() { return evaluateNanoseconds.load(std::memory_order_relaxed); }
+std::uint64_t ResourceMaterializer::MaterializeNanoseconds() { return materializeNanoseconds.load(std::memory_order_relaxed); }
 
 std::uint64_t ResourceMaterializer::SpecializationNanoseconds() {
     return specializationNanoseconds.load(std::memory_order_relaxed);

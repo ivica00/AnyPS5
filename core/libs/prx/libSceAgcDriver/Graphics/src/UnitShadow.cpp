@@ -1,4 +1,5 @@
 #include "prx/libSceAgcDriver/Graphics/include/UnitShadow.hpp"
+#include "prx/libSceAgcDriver/Graphics/include/SlimMutex.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/GuestBufferMemory.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Recorder.hpp"
 #include "prx/libSceAgcDriver/Graphics/include/Resources.hpp"
@@ -64,6 +65,12 @@ Statistics& Stats() {
     return statistics;
 }
 
+std::atomic<std::uint64_t> shadowSerial{1};
+
+void noteShadowChange() {
+    shadowSerial.fetch_add(1, std::memory_order_release);
+}
+
 struct UnitShadow {
     Context context;
     // The import's range and buffer (taken at creation: a publish under the import table's mutex
@@ -93,11 +100,12 @@ struct UnitShadow {
         std::uint32_t live = 0;
         for (std::uint64_t unit = 0; unit < Units(); ++unit) live += Live(unit) ? 1u : 0u;
         liveUnits = live;
+        noteShadowChange();
     }
 };
 
 struct Shadows {
-    std::mutex mutex;
+    SlimMutex mutex;
     std::map<std::uint64_t, std::shared_ptr<UnitShadow>> byBase;
     std::uint64_t liveBytes = 0;
     std::uint64_t peakBytes = 0;
@@ -422,6 +430,10 @@ bool evictOne(Shadows& registry) {
     return true;
 }
 
+}
+
+std::uint64_t ShadowSerial() {
+    return shadowSerial.load(std::memory_order_acquire);
 }
 
 bool UnitShadowEnabled() {
