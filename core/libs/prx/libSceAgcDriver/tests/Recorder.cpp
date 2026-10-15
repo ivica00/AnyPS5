@@ -43,7 +43,9 @@
 #endif
 #include <windows.h>
 #else
+#include <fcntl.h>
 #include <sys/mman.h>
+#include <unistd.h>
 #endif
 #include <functional>
 #include <algorithm>
@@ -109,7 +111,7 @@ void ReleaseWatched(void* block, std::size_t bytes) {
 // them, as the driver creates its own; the recorder's batches need a real queue and real fences.
 class Device {
 public:
-    Device() {
+    explicit Device(bool settleOnOtherFamily = false) {
 #ifdef _WIN32
         library = SDL_LoadObject("vulkan-1.dll");
 #else
@@ -173,10 +175,32 @@ public:
             while (family < count && (families[family].queueFlags & VK_QUEUE_COMPUTE_BIT) == 0) ++family;
             Require(family < count, "no Vulkan compute queue");
             const float priority = 1;
+            const float priorities[2]{1, 1};
             VkDeviceQueueCreateInfo queue{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
             queue.queueFamilyIndex = family;
             queue.queueCount = 1;
             queue.pQueuePriorities = &priority;
+            VkDeviceQueueCreateInfo settle{VK_STRUCTURE_TYPE_DEVICE_QUEUE_CREATE_INFO};
+            settle.queueCount = 1;
+            settle.pQueuePriorities = &priority;
+            constexpr std::uint32_t noSettleFamily = UINT32_MAX;
+            std::uint32_t settleFamily = noSettleFamily;
+#ifdef _WIN32
+            if (!settleOnOtherFamily && families[family].queueCount >= 2) {
+                queue.queueCount = 2;
+                queue.pQueuePriorities = priorities;
+                settleFamily = family;
+            } else {
+                const auto copies = [&](std::uint32_t index) { return index != family && families[index].queueCount != 0 && (families[index].queueFlags & (VK_QUEUE_TRANSFER_BIT | VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) != 0; };
+                for (std::uint32_t index = 0; index < families.size() && settleFamily == noSettleFamily; ++index) {
+                    if (copies(index) && (families[index].queueFlags & (VK_QUEUE_COMPUTE_BIT | VK_QUEUE_GRAPHICS_BIT)) == 0) settleFamily = index;
+                }
+                for (std::uint32_t index = 0; index < families.size() && settleFamily == noSettleFamily; ++index) {
+                    if (copies(index)) settleFamily = index;
+                }
+                settle.queueFamilyIndex = settleFamily;
+            }
+#endif
             VkPhysicalDeviceFeatures enabled{};
             enabled.shaderInt64 = VK_TRUE;
             graphics = (families[family].queueFlags & VK_QUEUE_GRAPHICS_BIT) != 0;
@@ -254,8 +278,9 @@ public:
                 address.pNext = &robustness;
             }
             VkDeviceCreateInfo device{VK_STRUCTURE_TYPE_DEVICE_CREATE_INFO, &address};
-            device.queueCreateInfoCount = 1;
-            device.pQueueCreateInfos = &queue;
+            const std::array<VkDeviceQueueCreateInfo, 2> queueInfos{queue, settle};
+            device.queueCreateInfoCount = settleFamily != noSettleFamily && settleFamily != family ? 2 : 1;
+            device.pQueueCreateInfos = queueInfos.data();
             device.enabledExtensionCount = static_cast<std::uint32_t>(extensionsEnabled.size());
             device.ppEnabledExtensionNames = extensionsEnabled.data();
             device.pEnabledFeatures = &enabled;
@@ -270,10 +295,20 @@ public:
             context.formatProperties = function<PFN_vkGetPhysicalDeviceFormatProperties>("vkGetPhysicalDeviceFormatProperties");
             context.imageFormatProperties = function<PFN_vkGetPhysicalDeviceImageFormatProperties>("vkGetPhysicalDeviceImageFormatProperties");
             context.Function<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(context.device, family, 0, &context.queue);
+            context.queueFamily = family;
             VkCommandPoolCreateInfo pool{VK_STRUCTURE_TYPE_COMMAND_POOL_CREATE_INFO};
             pool.flags = VK_COMMAND_POOL_CREATE_RESET_COMMAND_BUFFER_BIT;
             pool.queueFamilyIndex = family;
             Check(context.Function<PFN_vkCreateCommandPool>("vkCreateCommandPool")(context.device, &pool, nullptr, &context.pool), "vkCreateCommandPool");
+#ifdef _WIN32
+            if (settleFamily != noSettleFamily) {
+                context.Function<PFN_vkGetDeviceQueue>("vkGetDeviceQueue")(context.device, settleFamily, settleFamily == family ? 1 : 0, &context.settleQueue);
+                pool.queueFamilyIndex = settleFamily;
+                Check(context.Function<PFN_vkCreateCommandPool>("vkCreateCommandPool")(context.device, &pool, nullptr, &context.settlePool), "vkCreateCommandPool settle");
+                context.settleFamily = settleFamily;
+                context.settleQueueMutex = &settleMutex;
+            }
+#endif
         } catch (...) {
             release();
             throw;
@@ -300,6 +335,8 @@ private:
     }
 
     void release() noexcept {
+        if (context.device != VK_NULL_HANDLE) ClearHostImports(context.device);
+        if (context.settlePool != VK_NULL_HANDLE) context.Function<PFN_vkDestroyCommandPool>("vkDestroyCommandPool")(context.device, context.settlePool, nullptr);
         if (context.pool != VK_NULL_HANDLE) context.Function<PFN_vkDestroyCommandPool>("vkDestroyCommandPool")(context.device, context.pool, nullptr);
         context.bufferPool.reset();
         if (context.device != VK_NULL_HANDLE) {
@@ -315,6 +352,7 @@ private:
     VkInstance instance = VK_NULL_HANDLE;
     Context context{};
     bool graphics = false;
+    std::mutex settleMutex;
     bool nullDescriptors = false;
 };
 
@@ -3758,7 +3796,16 @@ void importWatchTests(const Device& device) {
     const auto& context = device.GetContext();
 #ifdef _WIN32
     Require(PrepareImportWatch(context) == ImportWatch::Unwatch, "Windows host imports stayed watched by default");
-    std::cout << "import watch decisions: Windows host imports use comparisons\n";
+    std::cout << "import watch decisions: Windows host imports through views use comparisons\n";
+    if (context.hostImportAlignment == 0 || !WriteWatched()) {
+        std::cout << "host imports or write watching unavailable: the Windows import probe not tested\n";
+        return;
+    }
+    const auto probe = ProbeImportWriteProtection(context);
+    Require(probe.failure == nullptr, std::string("(w) the Windows import probe failed at ") + (probe.failure != nullptr ? probe.failure : "") + " (" + std::to_string(static_cast<int>(probe.result)) + ")");
+    std::cout << "Windows import probe: " << probe.writtenAtImport << " of " << probe.pages << " scratch pages reported written at the import, " << probe.writtenDuringSettle << " by its 4-byte settle read, " << probe.writtenAfterSettle << " after it, " << probe.writtenAfterSubmit << " after a full GPU read, " << probe.writtenAfterSecondSubmit << " after a second, " << probe.writtenAfterFill << " after a GPU write, " << probe.writtenByCpu << " after a CPU store\n";
+    Require(probe.writtenByCpu != 0, "(w) a CPU store into a host-imported MEM_WRITE_WATCH range was not collected");
+    Require(probe.writtenAfterSettle == 0 || PrepareImportWatch(context) == ImportWatch::Unwatch, "(w) a settled import kept reporting writes and stayed watched");
 #else
     if (context.hostImportAlignment == 0 || !WriteWatched()) {
         std::cout << "host imports or write watching unavailable: import watch decisions not tested\n";
@@ -3768,7 +3815,11 @@ void importWatchTests(const Device& device) {
     Require(probe.failure == nullptr, std::string("(u) the import probe failed at ") + (probe.failure != nullptr ? probe.failure : "") + " (" + std::to_string(static_cast<int>(probe.result)) + ")");
     std::cout << "import probe: " << probe.writtenAfterSubmit << " of " << probe.pages << " scratch pages written after a GPU read, " << probe.writtenAfterFill << " after a GPU write, " << probe.writtenAtImport << " after the import\n";
     Require(probe.writtenByCpu != 0, "(u) a CPU store after the import probe's GPU read was not collected");
-    if (context.dmaBufImport) {
+    const int udmabuf = context.dmaBufImport ? open("/dev/udmabuf", O_RDWR | O_CLOEXEC) : -1;
+    if (udmabuf >= 0) close(udmabuf);
+    if (context.dmaBufImport && udmabuf < 0) {
+        std::cout << "/dev/udmabuf is not accessible: the dma-buf import probe not tested\n";
+    } else if (context.dmaBufImport) {
         const auto dmaBuf = ProbeDmaBufImportWriteProtection(context);
         Require(dmaBuf.failure == nullptr, std::string("(u) the dma-buf import probe failed at ") + (dmaBuf.failure != nullptr ? dmaBuf.failure : "") + " (" + std::to_string(static_cast<int>(dmaBuf.result)) + ")");
         Require(dmaBuf.writtenByCpu != 0, "(u) a CPU store into a dma-buf imported scratch range was not collected");
@@ -6435,6 +6486,103 @@ void fmaskDecompressMsaaTests(const Device& device, Recorder& recorder) {
     std::cout << "FMASK decompress MSAA clear and resolve tests passed\n";
 }
 
+void tiledResolveTests(const Device& device, Recorder& recorder) {
+    namespace GuestMemory = AgcDriver::GuestMemory;
+    auto context = device.GetContext();
+    if ((context.limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_4_BIT) == 0 || !device.Graphics()) {
+        std::cout << "4x color targets or graphics unavailable: CB resolves into tiled targets not tested\n";
+        return;
+    }
+    context.hostImportAlignment = 0;
+    TextureDetiler detiler(context);
+    context.detiler = &detiler;
+    constexpr std::uint32_t side = 128;
+    constexpr std::size_t targetBytes = side * side * 4u;
+    constexpr std::size_t sourceBytes = targetBytes * 4u;
+    constexpr std::size_t bytes = targetBytes + sourceBytes + 65536u;
+#ifdef _WIN32
+    void* block = VirtualAlloc(nullptr, bytes, MEM_RESERVE | MEM_COMMIT, PAGE_READWRITE);
+#else
+    void* block = std::aligned_alloc(65536, bytes);
+#endif
+    Require(block != nullptr, "cannot allocate the tiled resolve block");
+    const auto address = reinterpret_cast<std::uint64_t>(block);
+    {
+        GuestAllocations::Mutation mutation;
+        mutation.Add(block, bytes, true, true, true);
+    }
+    struct Release {
+        const Context& context;
+        void* block;
+        ~Release() {
+            ClearMultisampleTargets(context.device);
+            ClearCachedTextures(context.device);
+            {
+                GuestAllocations::Mutation mutation;
+                mutation.Remove(block);
+            }
+#ifdef _WIN32
+            VirtualFree(block, 0, MEM_RELEASE);
+#else
+            std::free(block);
+#endif
+        }
+    } release{context, block};
+    ColorTarget source{};
+    source.address = address + targetBytes;
+    source.surfaceAddress = source.address;
+    source.extent = {side, side};
+    source.surfaceExtent = source.extent;
+    source.format = VK_FORMAT_R8G8B8A8_UNORM;
+    source.bytes = targetBytes;
+    source.componentMapping = 0xe4u;
+    source.tileMode = ColorTileMode::RenderTarget;
+    source.samples = 4;
+    source.cmaskAddress = address + targetBytes + sourceBytes;
+    source.cmaskBytes = 4096;
+    source.cmaskFastClear = true;
+    const std::array<std::pair<ColorTileMode, std::uint32_t>, 3> modes{{{ColorTileMode::Standard4KB, 0x80402010u}, {ColorTileMode::Standard64KB, 0x10204080u}, {ColorTileMode::RenderTarget, 0x40801020u}}};
+    for (const auto& [mode, clear] : modes) {
+        const auto name = std::to_string(static_cast<std::uint32_t>(mode));
+        std::memset(block, 0x55, targetBytes);
+        std::memset(static_cast<std::byte*>(block) + targetBytes + sourceBytes, 0, 4096);
+        ColorTarget destination{};
+        destination.address = address;
+        destination.surfaceAddress = address;
+        destination.extent = {side, side};
+        destination.surfaceExtent = destination.extent;
+        destination.format = VK_FORMAT_R8G8B8A8_UNORM;
+        destination.bytes = targetBytes;
+        destination.componentMapping = 0xe4u;
+        destination.tileMode = mode;
+        source.clearWords = {clear, 0};
+        RunColorMetadataPass(context, {ColorMetadataPass::Mode::Resolve, {destination}, source});
+        std::vector<std::uint32_t> resolved(targetBytes / 4);
+        GuestMemory::Read(address, std::as_writable_bytes(std::span(resolved)));
+        const auto texels = std::ranges::count(resolved, clear);
+        Require(texels == static_cast<std::ptrdiff_t>(resolved.size()), "a CB resolve into a tile mode " + name + " target left " + std::to_string(resolved.size() - static_cast<std::size_t>(texels)) + " texels without the resolved color");
+        recorder.Sync();
+        ClearMultisampleTargets(context.device);
+        ClearCachedTextures(context.device);
+    }
+    {
+        ColorTarget destination{};
+        destination.address = address;
+        destination.extent = {side, side};
+        destination.format = VK_FORMAT_R8G8B8A8_UNORM;
+        destination.bytes = targetBytes;
+        destination.tileMode = ColorTileMode::Linear;
+        std::string message;
+        try {
+            RunColorMetadataPass(context, {ColorMetadataPass::Mode::Resolve, {destination}, source});
+        } catch (const std::exception& error) {
+            message = error.what();
+        }
+        Require(message.find("without a resident image is not implemented") != std::string::npos, "a CB resolve into a linear target did not throw: " + message);
+    }
+    recorder.Sync();
+}
+
 void depthSurfaceProofTests(const Device& device, Recorder& recorder) {
     const auto& base = device.GetContext();
     if (!device.NullDescriptors()) {
@@ -7800,13 +7948,25 @@ int main(int argc, char** argv) {
         }
         std::unique_ptr<Device> created;
         try {
-            created = std::make_unique<Device>();
+            created = std::make_unique<Device>(argc == 2 && std::string_view(argv[1]) == "--import-watch-other-family-only");
         } catch (const std::exception& error) {
             if (std::getenv("ANYPS5_REQUIRE_VULKAN") != nullptr) throw;
             std::cout << "skipped, no usable Vulkan device: " << error.what() << '\n';
             return 77;
         }
         Device& device = *created;
+        if (argc == 2 && std::string_view(argv[1]) == "--import-watch-only") {
+            importWatchTests(device);
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--import-watch-other-family-only") {
+            if (device.GetContext().settleQueue == VK_NULL_HANDLE) {
+                std::cout << "skipped, no other queue family to settle imports on\n";
+                return 77;
+            }
+            importWatchTests(device);
+            return 0;
+        }
         if (argc == 2 && std::string_view(argv[1]) == "--host-import-retirement-only") {
             const auto alignment = device.GetContext().hostImportAlignment;
             if (alignment == 0 || alignment > 65536) {
@@ -7877,6 +8037,15 @@ int main(int argc, char** argv) {
         }
         if (argc == 2 && (std::string_view(argv[1]) == "--storage-upload-lifetime-only" || std::string_view(argv[1]) == "--storage-upload-failure-only")) {
             storageUploadLifetimeTests(device, recorder, std::string_view(argv[1]) == "--storage-upload-failure-only");
+            return 0;
+        }
+        if (argc == 2 && std::string_view(argv[1]) == "--tiled-resolve-only") {
+            if ((device.GetContext().limits.framebufferColorSampleCounts & VK_SAMPLE_COUNT_4_BIT) == 0 || !device.Graphics()) {
+                std::cout << "skipped, the device lacks 4x color targets or a graphics queue\n";
+                return 77;
+            }
+            tiledResolveTests(device, recorder);
+            std::cout << "CB resolves into tiled targets tests passed\n";
             return 0;
         }
         if (argc == 2 && std::string_view(argv[1]) == "--cube-only") {
@@ -8044,6 +8213,7 @@ int main(int argc, char** argv) {
         readWrittenStagingTests(device, recorder);
         depthSurfaceProofTests(device, recorder);
         multisampleGuestAccessTests(device, recorder);
+        tiledResolveTests(device, recorder);
         fmaskDecompressMsaaTests(device, recorder);
         misalignedSnapshotTests(device, recorder);
         misalignedRegionTests(device, recorder);
